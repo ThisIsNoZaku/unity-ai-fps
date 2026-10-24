@@ -221,6 +221,23 @@ namespace GoalDrivenAI.Tests
             Assert.That(store.Owns("b", new[] { "cover" }), Is.True);
         }
 
+        [Test]
+        public void LeaseAvailabilityIsAdvisoryNonAcquiringAndIncludesExpiry()
+        {
+            var clock = new Clock();
+            var store = new LeaseStore(clock);
+            Assert.That(store.IsAvailable(new[] { "cover", "weapon" }), Is.True);
+            Assert.That(store.TryAcquire("a", new[] { "cover" }, 1), Is.True);
+            Assert.That(store.IsAvailable(new[] { "weapon", "cover" }), Is.False);
+            Assert.That(store.IsAvailable(new[] { "weapon" }), Is.True);
+            Assert.That(store.TryAcquire("b", new[] { "weapon" }, 2), Is.True);
+            clock.Now = 1;
+            Assert.That(store.IsAvailable(new[] { "cover" }), Is.True);
+            Assert.That(store.IsAvailable(new[] { "cover", "weapon" }), Is.False);
+            Assert.That(store.TryAcquire("c", new[] { "cover" }, 1), Is.True);
+            Assert.That(store.IsAvailable(new[] { "cover" }), Is.False);
+        }
+
         private sealed class TestAction : IRuntimeAction
         {
             public string Id => "test";

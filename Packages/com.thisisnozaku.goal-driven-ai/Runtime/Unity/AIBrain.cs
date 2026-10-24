@@ -81,6 +81,7 @@ namespace GoalDrivenAI.Unity
             weapon.ConfirmedNeutralization += ConfirmNeutralized;
             actor.Damaged += OnDamage;
             actor.Died += OnDeath;
+            actor.Incapacitated += Interrupt;
             weapon.AmmunitionChanged += SelfChanged;
             weapon.FirePermission = CanFire;
             commands.Register(this);
@@ -98,6 +99,7 @@ namespace GoalDrivenAI.Unity
             weapon.ConfirmedNeutralization -= ConfirmNeutralized;
             actor.Damaged -= OnDamage;
             actor.Died -= OnDeath;
+            actor.Incapacitated -= Interrupt;
             weapon.AmmunitionChanged -= SelfChanged;
             runner?.Dispose();
             CoverLeases.ReleaseOwner("occupant-" + actor.Id);
@@ -124,6 +126,8 @@ namespace GoalDrivenAI.Unity
         private void OnDamage(float damage, Vector3 position) { safe = false; revision++; }
         private void OnDeath()
         {
+            OrderRecord order = commands.Service.GetPrimary(actor.Id);
+            if (order != null) commands.Service.ReportFailure(order.Request.OrderId, "Recipient died.");
             runner.Dispose();
             plan.Clear();
             motor.Stop();
@@ -165,7 +169,7 @@ namespace GoalDrivenAI.Unity
 
         public void Decide(double now)
         {
-            if (!actor.IsAlive) return;
+            if (!actor.CanAct) return;
             OrderRecord order = commands.Service.GetPrimary(actor.Id);
             string orderId = order?.Request.OrderId;
             if (orderId != activeOrder)
@@ -194,6 +198,13 @@ namespace GoalDrivenAI.Unity
             if (target != null && CanFire())
                 candidates.Add(new GoalCandidate("EngageThreat", profile.aggression, requiredCommandId: command));
             Evidence contact = SearchEvidence(order);
+            if (order?.Request.Type == OrderType.Attack && target == null && contact == null
+                && !neutralized.Contains(order.Request.TargetId ?? ""))
+            {
+                commands.Service.ReportFailure(order.Request.OrderId, "Contact unresolved after bounded search or evidence expiry.");
+                Invalidate();
+                return;
+            }
             if (contact != null && !danger)
                 candidates.Add(new GoalCandidate("InvestigateContact", 0.5, requiredCommandId: command));
             if (order != null && order.Status == OrderStatus.Active
@@ -257,7 +268,7 @@ namespace GoalDrivenAI.Unity
             string region = commands.Service.GetEffectiveConstraints(actor.Id).RegionId;
             return region == null || commands.InRegion(region, position.ToVector());
         }
-        private bool CanFire() => actor.IsAlive && !commands.Service.GetEffectiveConstraints(actor.Id).HoldFire;
+        private bool CanFire() => actor.CanAct && !commands.Service.GetEffectiveConstraints(actor.Id).HoldFire;
         private bool AllowedRoute(Position destination)
         {
             if (!Allowed(destination)) return false;
@@ -291,21 +302,27 @@ namespace GoalDrivenAI.Unity
                     {
                         string id = "approach-" + actions.Count;
                         var at = new Fact("attack-position", true, id);
-                        AddMove(actions, id, point, new[] { at });
+                        AddMove(actions, id, point, new[] { at },
+                            () => visible.TryGetValue(target, out var latest) && latest.DistanceTo(observed) <= 2);
                         AddBurst(actions, target, done, new[] { at }, id);
                     }
                 }
             }
             else if (selected.Id == "StayAlive")
             {
-                Position threat = visible.Count > 0 ? visible.OrderBy(p => p.Key, StringComparer.Ordinal).First().Value : home;
-                foreach (CoverSlot cover in coverSlots.Where(c => c != null && c != occupiedCover && c.UsableFrom(threat.ToVector()))
+                Position? threat = visible.Count > 0 ? visible.OrderBy(p => p.Key, StringComparer.Ordinal).First().Value
+                    : beliefs.Snapshot().Where(e => e.Kind == EvidenceKind.Vision && e.Position.HasValue)
+                        .OrderByDescending(e => e.ObservedAt).FirstOrDefault()?.Position;
+                foreach (CoverSlot cover in coverSlots.Where(c => c != null && c != occupiedCover
+                    && c.isActiveAndEnabled && (!threat.HasValue || c.UsableFrom(threat.Value.ToVector())))
+                    .Where(c => CoverLeases.IsAvailable(new[] { "cover-" + c.Id }))
                     .Where(c => Allowed(c.Refuge.ToPosition()) && Reachable(c.Refuge))
                     .OrderBy(c => Vector3.Distance(transform.position, c.Refuge)).ThenBy(c => c.Id, StringComparer.Ordinal).Take(4))
                 {
                     int coverRevision = cover.Revision;
                     AddMove(actions, "cover-" + cover.Id, cover.Refuge.ToPosition(), new[] { done },
-                        () => cover != null && cover.Revision == coverRevision && cover.UsableFrom(threat.ToVector()),
+                        () => cover != null && cover.isActiveAndEnabled && cover.Revision == coverRevision
+                            && (!threat.HasValue || cover.UsableFrom(threat.Value.ToVector())),
                         "cover-" + cover.Id, () => { pendingCover = cover; safe = true; });
                 }
             }
@@ -326,13 +343,17 @@ namespace GoalDrivenAI.Unity
                     && clock.Now - allySeenAt[order.Request.TargetId] < 2)
                 {
                     double distance = motor.Position.DistanceTo(leader);
-                    if (distance > 4)
+                    if (distance > 4 || distance < 2)
                     {
-                        Vector3 away = (transform.position - leader.ToVector()).normalized;
+                        Vector3 away = transform.position - leader.ToVector();
+                        away.y = 0;
+                        if (away.sqrMagnitude < 0.01f) away = transform.forward;
+                        away.Normalize();
                         AddMove(actions, "follow", (leader.ToVector() + away * 3).ToPosition(), new[] { done });
                     }
                 }
-                else if (order.Request.Position.HasValue)
+                else if ((order.Request.Type == OrderType.Move || order.Request.Type == OrderType.HoldArea)
+                    && order.Request.Position.HasValue)
                     AddMove(actions, "assignment", order.Request.Position.Value, new[] { done });
                 else if (order.Request.Type == OrderType.Attack && neutralized.Contains(order.Request.TargetId ?? ""))
                     commands.Service.ReportCompletion(order.Request.OrderId, "verified");
@@ -404,11 +425,13 @@ namespace GoalDrivenAI.Unity
             {
                 int shots = 0;
                 return new RuntimeAction("burst", new[] { "aim", "hands" }, Array.Empty<string>(),
-                    () => CanFire() && visible.ContainsKey(target) && weapon.Magazine > 0,
+                    () => CanFire() && visible.TryGetValue(target, out var position)
+                        && motor.Position.DistanceTo(position) <= profile.engagementRange && weapon.Magazine > 0,
                     () => true,
                     () =>
                     {
-                        if (!CanFire() || !visible.TryGetValue(target, out var position)) return ActionStatus.Failed;
+                        if (!CanFire() || !visible.TryGetValue(target, out var position)
+                            || motor.Position.DistanceTo(position) > profile.engagementRange) return ActionStatus.Failed;
                         aim.AimAt(position);
                         if (weapon.TryFire()) shots++;
                         return shots >= 3 || weapon.Magazine == 0 || neutralized.Contains(target)
@@ -462,6 +485,7 @@ namespace GoalDrivenAI.Unity
         private void Update()
         {
             if (!initialized || !actor.IsAlive) return;
+            if (!actor.CanAct) { runner.RequestCancel(); return; }
             if (occupiedCover != null)
             {
                 string owner = "occupant-" + actor.Id;
@@ -490,7 +514,12 @@ namespace GoalDrivenAI.Unity
                     plan.Clear();
                     LastFailure = result.Reason;
                     if (clock.Now - failureWindow > 5) { failureWindow = clock.Now; failures = 0; }
-                    if (++failures >= 3) { retryAt = clock.Now + 5; selector.MarkInfeasible(selected?.Id ?? "none"); }
+                    if (++failures >= 3)
+                    {
+                        retryAt = clock.Now + 5;
+                        selector.MarkInfeasible(selected?.Id ?? "none");
+                        if (activeOrder != null) commands.Service.ReportFailure(activeOrder, LastFailure);
+                    }
                 }
             }
             if (running == null && plan.Count > 0)

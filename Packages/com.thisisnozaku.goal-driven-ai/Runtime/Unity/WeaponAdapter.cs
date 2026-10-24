@@ -41,7 +41,7 @@ namespace GoalDrivenAI.Unity
 
         public bool TryFire()
         {
-            if (!actor.IsAlive || !aim.IsAligned || !FirePermission()) return false;
+            if (!actor.CanAct || !aim.IsAligned || !FirePermission()) return false;
             Vector2 spread = UnityEngine.Random.insideUnitCircle * inaccuracyDegrees;
             Vector3 direction = Quaternion.Euler(spread.y, spread.x, 0) * aim.Forward;
             bool hit = Physics.Raycast(aim.Origin, direction, out RaycastHit result, range, firingMask,
@@ -60,7 +60,7 @@ namespace GoalDrivenAI.Unity
             return true;
         }
 
-        public bool TryReload() => actor.IsAlive && state.BeginReload(Time.timeAsDouble);
+        public bool TryReload() => actor.CanAct && state.BeginReload(Time.timeAsDouble);
         public void CancelReload() => state?.CancelReload();
         private void OnDisable() { CancelReload(); FirePermission = () => false; }
     }

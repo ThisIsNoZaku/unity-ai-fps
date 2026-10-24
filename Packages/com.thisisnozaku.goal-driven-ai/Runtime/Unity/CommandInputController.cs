@@ -23,7 +23,7 @@ namespace GoalDrivenAI.Unity
         private Task<FinalTranscript> transcript;
         private CommandContext voiceSnapshot;
         private string text = "";
-        private int lastOutcome;
+        private long lastOutcome;
         public string Phase { get; private set; } = "Ready";
         public string Feedback { get; private set; } = "";
         public BoundedPlanJournal Journal { get; private set; }
@@ -57,6 +57,8 @@ namespace GoalDrivenAI.Unity
         public void SubmitText(string utterance)
         {
             CancelPending();
+            if (string.IsNullOrWhiteSpace(utterance) || utterance.Length > 4096)
+            { Feedback = "Enter a command of at most 4096 characters."; return; }
             if (interpretation == null) { Feedback = "No language provider configured; use the command menu."; return; }
             contexts.Next = contexts.Source.Capture(host.PlayerIdentity, Recipients());
             Begin(new FinalTranscript(utterance), contexts.Next);
@@ -69,7 +71,14 @@ namespace GoalDrivenAI.Unity
             voiceSnapshot = contexts.Source.Capture(host.PlayerIdentity, Recipients());
             microphone = new CancellationTokenSource();
             Phase = "Listening";
-            transcript = speech.RecognizeFinalAsync(microphone.Token);
+            try { transcript = speech.RecognizeFinalAsync(microphone.Token); }
+            catch (Exception)
+            {
+                microphone.Dispose();
+                microphone = null;
+                Phase = "Failed";
+                Feedback = "Speech recognizer unavailable.";
+            }
         }
 
         private void Begin(FinalTranscript final, CommandContext snapshot)
@@ -95,12 +104,15 @@ namespace GoalDrivenAI.Unity
             }
             interpretation?.Pump();
             plans?.Pump();
-            if (interpretation != null && interpretation.Outcomes.Count > lastOutcome)
+            if (interpretation != null && interpretation.Outcomes.Count > 0)
             {
                 var outcome = interpretation.Outcomes[interpretation.Outcomes.Count - 1];
-                lastOutcome = interpretation.Outcomes.Count;
-                Phase = outcome.Status.ToString();
-                Feedback = outcome.Detail;
+                if (outcome.Generation > lastOutcome)
+                {
+                    lastOutcome = outcome.Generation;
+                    Phase = outcome.Status.ToString();
+                    Feedback = outcome.Detail;
+                }
             }
         }
 

@@ -131,8 +131,12 @@ namespace GoalDrivenAI.Unity
         public OrderResult StopPlayerOrder(string recipient)
         {
             OrderRecord primary = Service.GetPrimary(recipient);
-            if (primary == null) return new OrderResult(false, "No primary order.");
-            OrderResult result = Service.Cancel(playerIdentity, primary.Request.OrderId);
+            OrderResult result = new OrderResult(false, "No applicable orders.");
+            foreach (OrderRecord order in Service.Orders.Where(order => !order.IsTerminal
+                && order.Request.Recipient == recipient
+                && (order.Issuer == playerIdentity || order.Request.OrderId == primary?.Request.OrderId))
+                .OrderByDescending(order => order.Sequence))
+                result = Service.Cancel(playerIdentity, order.Request.OrderId);
             if (result.Accepted && brains.TryGetValue(recipient, out var brain)) brain.Interrupt();
             return result;
         }

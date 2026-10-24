@@ -27,10 +27,12 @@ namespace GoalDrivenAI.Language
         public string Id { get; }
         public HandleKind Kind { get; }
         public Position Position { get; }
-        public CatalogHandle(string id, HandleKind kind, Position position)
+        public string? RegionId { get; }
+        public CatalogHandle(string id, HandleKind kind, Position position, string? regionId = null)
         {
             if (!Enum.IsDefined(typeof(HandleKind), kind)) throw new ArgumentOutOfRangeException(nameof(kind));
             Id = RequireId(id); Kind = kind; Position = position;
+            RegionId = regionId == null ? null : RequireId(regionId);
         }
         internal static string RequireId(string id)
         {
@@ -182,7 +184,8 @@ namespace GoalDrivenAI.Language
                 var handles = ((JArray)c["handles"]!).Select(t => {
                     var h = (JObject)t;
                     return new CatalogHandle(String(h, "id"), EnumValue<HandleKind>(h, "kind"),
-                        new Position((float)h["x"]!, (float)h["y"]!, (float)h["z"]!));
+                        new Position((float)h["x"]!, (float)h["y"]!, (float)h["z"]!),
+                        h["regionId"]?.Type == JTokenType.Null ? null : String(h, "regionId"));
                 }).ToArray();
                 var context = new CommandContext(String(c, "issuer"), String(c, "session"), (long)c["revision"]!,
                     Strings(c, "recipients", 8), handles, (double)c["capturedAt"]!,
@@ -376,7 +379,8 @@ namespace GoalDrivenAI.Language
                     ["capturedAt"] = context.CapturedAt, ["recipients"] = new JArray(context.Recipients),
                     ["aimedHandle"] = context.AimedHandle, ["markerHandle"] = context.MarkerHandle,
                     ["handles"] = new JArray(context.Handles.Values.OrderBy(h => h.Id, StringComparer.Ordinal).Select(h =>
-                        new JObject { ["id"] = h.Id, ["kind"] = h.Kind.ToString(), ["x"] = h.Position.X, ["y"] = h.Position.Y, ["z"] = h.Position.Z }))
+                        new JObject { ["id"] = h.Id, ["kind"] = h.Kind.ToString(), ["x"] = h.Position.X, ["y"] = h.Position.Y,
+                            ["z"] = h.Position.Z, ["regionId"] = h.RegionId }))
                 },
                 ["nodes"] = new JArray(plan.Nodes.Select(n => new JObject {
                     ["id"] = n.Id, ["type"] = n.Kind.ToString(), ["dependsOn"] = new JArray(n.Dependencies),

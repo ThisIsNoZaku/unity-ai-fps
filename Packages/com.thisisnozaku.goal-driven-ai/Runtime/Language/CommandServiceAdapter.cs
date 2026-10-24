@@ -131,22 +131,27 @@ namespace GoalDrivenAI.Language
         }
         private static string Id(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient) =>
             plan.Hash + "_" + node.Id + "_" + recipient;
-        private static OrderRequest Order(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient)
+        private OrderRequest Order(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient)
         {
             if (!Enum.GetNames(typeof(OrderType)).Contains(node.Order!.Name)) throw new ArgumentException("Unknown native order.");
             var type = (OrderType)Enum.Parse(typeof(OrderType), node.Order.Name);
             var completion = type == OrderType.HoldArea || type == OrderType.Follow || type == OrderType.CoverAlly ?
                 CompletionMode.Persistent : CompletionMode.Once;
+            var effective = commands.GetEffectiveConstraints(recipient);
+            bool holdFire = effective.HoldFire || plan.Nodes.Any(n => n.Kind == PlanNodeKind.SetPolicy &&
+                n.Recipients.Contains(recipient) && n.Policy == CommandPolicy.Engagement && n.Value == PolicyValue.HoldFire);
             return new OrderRequest(Id(plan, node, recipient), recipient, type,
                 node.Target?.Position, node.Target?.Kind == HandleKind.Actor ? node.Target.Id : null,
-                new OrderConstraints(completion: completion), deliveryTimeout: node.Timeout);
+                new OrderConstraints(holdFire, node.Target?.RegionId ?? effective.RegionId,
+                    effective.MaxRisk, effective.ExpiresAt, completion), deliveryTimeout: node.Timeout);
         }
-        private static PolicyRequest Policy(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient)
+        private PolicyRequest Policy(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient)
         {
             if (node.Policy != CommandPolicy.Engagement || node.Value != PolicyValue.HoldFire)
                 throw new ArgumentException("Native runtime does not implement this policy.");
+            var effective = commands.GetEffectiveConstraints(recipient);
             return new PolicyRequest(Id(plan, node, recipient), recipient,
-                new OrderConstraints(holdFire: true));
+                new OrderConstraints(true, effective.RegionId, effective.MaxRisk, effective.ExpiresAt));
         }
         private void MainThread()
         {

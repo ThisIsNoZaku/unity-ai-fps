@@ -36,6 +36,11 @@ namespace GoalDrivenAI.Tactics
             var keys = Keys(resources);
             lock (sync) { Expire(); return keys.All(k => leases.TryGetValue(k, out var lease) && lease.Owner == owner); }
         }
+        public bool IsAvailable(IEnumerable<string> resources)
+        {
+            var keys = Keys(resources);
+            lock (sync) { Expire(); return keys.All(k => !leases.ContainsKey(k)); }
+        }
         public void ReleaseOwner(string owner)
         {
             lock (sync)

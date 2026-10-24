@@ -11,6 +11,7 @@ namespace GoalDrivenAI.Unity
         [SerializeField] private string faction = "enemy";
         [SerializeField, Min(1)] private float maximumHealth = 100;
         private float health;
+        private double stunnedUntil;
         private static readonly Dictionary<string, Actor> identities = new Dictionary<string, Actor>(StringComparer.Ordinal);
 
         public string Id
@@ -28,8 +29,10 @@ namespace GoalDrivenAI.Unity
         public float Health => health;
         public float HealthFraction => health / maximumHealth;
         public bool IsAlive => health > 0;
+        public bool CanAct => IsAlive && Time.timeAsDouble >= stunnedUntil;
         public event Action<float, Vector3> Damaged;
         public event Action Died;
+        public event Action Incapacitated;
 
         private void Awake() { _ = Id; health = maximumHealth; }
 
@@ -50,7 +53,14 @@ namespace GoalDrivenAI.Unity
             if (!IsAlive) Died?.Invoke();
         }
 
-        public void ResetForPool() => health = maximumHealth;
+        public void Stun(float seconds)
+        {
+            if (!IsAlive || seconds <= 0 || float.IsNaN(seconds) || float.IsInfinity(seconds)) return;
+            stunnedUntil = Math.Max(stunnedUntil, Time.timeAsDouble + seconds);
+            Incapacitated?.Invoke();
+        }
+
+        public void ResetForPool() { health = maximumHealth; stunnedUntil = 0; }
 
         private void OnValidate()
         {

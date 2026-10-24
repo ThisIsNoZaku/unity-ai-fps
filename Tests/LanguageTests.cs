@@ -16,7 +16,7 @@ namespace GoalDrivenAI.Tests
         private static string Proposal(params string[] nodes) =>
             "{\"schemaVersion\":1,\"catalogVersion\":\"v1\",\"nodes\":[" + string.Join(",", nodes) + "]}";
         private static CommandContext Context(long revision = 1) => new CommandContext("player", "session", revision,
-            new[] { "bot" }, new[] { new CatalogHandle("marker", HandleKind.Location, new Position(1, 2, 3)) }, 0, markerHandle: "marker", requestId: "request");
+            new[] { "bot" }, new[] { new CatalogHandle("marker", HandleKind.Location, new Position(1, 2, 3), "region") }, 0, markerHandle: "marker", requestId: "request");
         private static PlanCompiler Compiler() => new PlanCompiler(new CommandCatalog("v1", new[] {
             new OrderDefinition("Move", true, true, 20, PlanFailurePolicy.BlockDependents),
             new OrderDefinition("Hold", false, true, 20, PlanFailurePolicy.BlockDependents)
@@ -106,6 +106,24 @@ namespace GoalDrivenAI.Tests
             commands.ReportCompletion(id, "verified hold location"); adapter.Pump();
             Assert.That(commands.GetOrder(id)!.Status, Is.EqualTo(OrderStatus.Active));
             Assert.That(journal.Outcomes.Last().Status, Is.EqualTo(PlanNodeStatus.Succeeded));
+        }
+        [Test]
+        public void NativeHoldFireAndMovePreserveCapturedRegionAndEffectiveRestrictions()
+        {
+            var clock = new Clock(); var journal = new BoundedPlanJournal(); var scheduler = new CapturedThreadScheduler();
+            var commands = new CommandService(clock, new Validator());
+            commands.Hierarchy.SetRole("player", AuthorityLevel.Player); commands.Hierarchy.AddFriendly("bot");
+            commands.SetPolicy("player", new PolicyRequest("existing", "bot", new OrderConstraints(regionId: "region", maxRisk: .3)));
+            var policy = "{\"id\":\"policy\",\"type\":\"SetPolicy\",\"dependsOn\":[],\"recipients\":[\"bot\"],\"policy\":\"Engagement\",\"value\":\"HoldFire\"}";
+            var move = Issue.Replace("\"dependsOn\":[]", "\"dependsOn\":[\"policy\"]");
+            var plan = Compiler().Compile(Proposal(policy, move), Context()).Plan!;
+            var adapter = new CommandServiceAdapter(commands, new Contexts(), clock, scheduler, journal);
+            Assert.That(adapter.TryCommit(plan, out var reason), Is.True, reason); adapter.Pump();
+            var order = commands.Orders.Single().Request;
+            Assert.That(order.Constraints.HoldFire, Is.True);
+            Assert.That(order.Constraints.RegionId, Is.EqualTo("region"));
+            Assert.That(order.Constraints.MaxRisk, Is.EqualTo(.3));
+            Assert.That(order.Position!.Value, Is.EqualTo(new Position(1, 2, 3)));
         }
         [TestCase("```json\n{}\n```")]
         [TestCase("{\"schemaVersion\":1,\"schemaVersion\":1,\"catalogVersion\":\"v1\",\"nodes\":[]}")]
@@ -224,6 +242,47 @@ namespace GoalDrivenAI.Tests
             Assert.That(outcome.Context!.RequestId, Is.EqualTo("clarify"));
             Assert.That(outcome.CandidateHandles, Is.EqualTo(new[] { "marker" }));
             Assert.That(sink.Commits, Is.Zero);
+        }
+        [Test]
+        public async Task ScheduledModelBoundsInflightAndQueueAndCancelsQueuedRequests()
+        {
+            var provider = new DeferredModel();
+            var model = new ScheduledCommandModel(provider, concurrency: 2, maxQueued: 1);
+            var request = new LanguageModelRequest("move", Context(), 10);
+            var first = model.InterpretAsync(request, CancellationToken.None);
+            var second = model.InterpretAsync(request, CancellationToken.None);
+            using var queuedCancellation = new CancellationTokenSource();
+            var queued = model.InterpretAsync(request, queuedCancellation.Token);
+            Assert.That(provider.Requests.Count, Is.EqualTo(2));
+            Assert.That((await model.InterpretAsync(request, CancellationToken.None)).Status, Is.EqualTo(ModelStatus.Unavailable));
+            queuedCancellation.Cancel();
+            Assert.That((await queued).Status, Is.EqualTo(ModelStatus.Cancelled));
+            Assert.That(provider.Requests.Count, Is.EqualTo(2));
+            provider.Requests[0].SetResult(new ModelResult(ModelStatus.Success, Proposal(Issue)));
+            provider.Requests[1].SetResult(new ModelResult(ModelStatus.Success, Proposal(Issue)));
+            Assert.That((await first).Status, Is.EqualTo(ModelStatus.Success));
+            Assert.That((await second).Status, Is.EqualTo(ModelStatus.Success));
+        }
+        [Test]
+        public async Task ScheduledModelKeepsPermitUntilCancellationIgnoringProviderReturns()
+        {
+            var provider = new DeferredModel();
+            var model = new ScheduledCommandModel(provider, concurrency: 1, maxQueued: 1);
+            var request = new LanguageModelRequest("move", Context(), 10);
+            using var cancellation = new CancellationTokenSource();
+            var first = model.InterpretAsync(request, cancellation.Token);
+            cancellation.Cancel();
+            Assert.That((await first).Status, Is.EqualTo(ModelStatus.Cancelled));
+            using var queuedCancellation = new CancellationTokenSource();
+            var queued = model.InterpretAsync(request, queuedCancellation.Token);
+            Assert.That(provider.Requests.Count, Is.EqualTo(1));
+            Assert.That((await model.InterpretAsync(request, CancellationToken.None)).Status, Is.EqualTo(ModelStatus.Unavailable));
+            queuedCancellation.Cancel(); await queued;
+            provider.Requests[0].SetResult(new ModelResult(ModelStatus.Success, Proposal(Issue)));
+            var next = model.InterpretAsync(request, CancellationToken.None);
+            Assert.That(provider.Requests.Count, Is.EqualTo(2));
+            provider.Requests[1].SetResult(new ModelResult(ModelStatus.Success, Proposal(Issue)));
+            Assert.That((await next).Status, Is.EqualTo(ModelStatus.Success));
         }
         [Test]
         public void RepairIsLimitedToOneAttemptAndOriginalDeadline()
