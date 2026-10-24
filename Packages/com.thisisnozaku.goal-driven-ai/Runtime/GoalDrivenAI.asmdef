@@ -1,0 +1,6 @@
+{
+  "name": "GoalDrivenAI",
+  "rootNamespace": "GoalDrivenAI",
+  "references": ["Unity.Newtonsoft.Json"],
+  "autoReferenced": true
+}
