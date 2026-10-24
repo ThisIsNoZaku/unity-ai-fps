@@ -1,0 +1,6 @@
+{
+  "name": "GoalDrivenAI.Unity",
+  "rootNamespace": "GoalDrivenAI.Unity",
+  "references": ["GoalDrivenAI"],
+  "autoReferenced": true
+}
