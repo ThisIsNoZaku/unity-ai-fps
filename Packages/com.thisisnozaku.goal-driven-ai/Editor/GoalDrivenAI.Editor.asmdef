@@ -1,0 +1,7 @@
+{
+  "name": "GoalDrivenAI.Editor",
+  "rootNamespace": "GoalDrivenAI.Unity.Editor",
+  "references": ["GoalDrivenAI.Unity"],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": true
+}
