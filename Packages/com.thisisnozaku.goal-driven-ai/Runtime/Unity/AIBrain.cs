@@ -49,6 +49,14 @@ namespace GoalDrivenAI.Unity
         public string GoalId => selected?.Id;
         public string LastFailure { get; private set; }
         public BeliefStore Beliefs => beliefs;
+        public string DebugActiveGoal => selected?.Id;
+        public string DebugRunningAction => running?.Id;
+        public IReadOnlyList<string> DebugQueuedActions =>
+            Array.AsReadOnly(plan.Select(action => action.Id).ToArray());
+        public string DebugPlanningStatus => planner?.Result == null
+            ? "Not started"
+            : planner.Result.Status.ToString();
+        public int DebugExpandedNodes => planner?.Result?.Expanded ?? 0;
 
         private void Awake()
         {

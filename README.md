@@ -120,7 +120,9 @@ Choose one integration path:
   own brain. The supplied `AIBrain` resolves **concrete components** with
   `GetComponent`; implementing `INavigationMotor` or `IWeaponAdapter` alone does
   not replace those components. Adapting that composition is game-side work,
-  not an Inspector option currently provided by the package.
+  not an Inspector option currently provided by the package. In Play Mode,
+  the supplied `AIBrain` Inspector shows its active goal, current action,
+  queued plan steps and planning status.
 
 For either path:
 
