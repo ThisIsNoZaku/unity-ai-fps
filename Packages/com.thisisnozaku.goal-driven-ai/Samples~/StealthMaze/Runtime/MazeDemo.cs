@@ -22,13 +22,16 @@ namespace GoalDrivenAI.Samples.StealthMaze
         [Min(0)] public float shoutRange = 16;
         public MazeMap Map { get; private set; }
         public MazePlayer Player { get; private set; }
-        public Vector3 Exit => Point((Map.Width - 2, Map.Height - 2));
+        public RuntimeNavMesh GuardNavigation { get; private set; }
+        public RuntimeNavMesh InfiltratorNavigation { get; private set; }
+        public Vector3 Exit => LocationPosition(Scenario.ExitLocation.Id);
         public bool Won { get; private set; }
         public string Message { get; set; } = "Choose a role to join the maze.";
         private const float CellSize = MazeScenario.CellSize;
         private readonly List<MazeGuard> guards = new List<MazeGuard>();
         private readonly List<Material> materials = new List<Material>();
         private Transform generated;
+        private AudioClip footstepSound, shoutSound;
         private int captures;
         private float resetGrace;
         private bool capturePending;
@@ -39,6 +42,8 @@ namespace GoalDrivenAI.Samples.StealthMaze
 
         private void Start()
         {
+            footstepSound = Cue("Footstep", .09f, 95);
+            shoutSound = Cue("Guard shout cue", .22f, 520);
             Map = new MazeMap(seed);
             Scenario = new MazeScenario(new UnityClock(), Map, Mathf.Clamp(enemyCount, 1, 6), Mathf.Clamp(checkpointCount, 2, 5));
             generated = new GameObject("Generated stealth maze").transform; generated.SetParent(transform, false);
@@ -52,7 +57,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
             var cover = MakeMaterial(new Color(.6f, .42f, .2f));
             Box("Floor", new Vector3((Map.Width - 1) * 1.5f, -.2f, (Map.Height - 1) * 1.5f),
                 new Vector3(Map.Width * CellSize, .4f, Map.Height * CellSize), floor);
-            var patrolCells = new List<(int x, int y)>();
+            var spawnCells = new List<(int x, int y)>();
             for (int y = 0; y < Map.Height; y++) for (int x = 0; x < Map.Width; x++)
             {
                 var point = Point((x, y));
@@ -64,15 +69,25 @@ namespace GoalDrivenAI.Samples.StealthMaze
                 }
                 else if (x % 2 == 1 && y % 2 == 1)
                 {
-                    if (Vector3.Distance(point, Point((1, 1))) > 12) patrolCells.Add((x, y));
+                    if (Vector3.Distance(point, Point((1, 1))) > 12) spawnCells.Add((x, y));
                     if ((x + y) % 4 == 0 && (x != 1 || y != 1) && (x != Map.Width - 2 || y != Map.Height - 2))
-                        Box("Low crouch cover", point + new Vector3(.95f, .48f, 0), new Vector3(.65f, .96f, 1.6f), cover);
+                        // Leave a guard-width route on either side of cover within the corridor.
+                        Box("Low crouch cover", point + new Vector3(.95f, .48f, 0), new Vector3(.65f, .96f, 1.0f), cover);
                 }
             }
+            // Bake after static geometry, before spawning any actors or decorative markers.
+            Physics.SyncTransforms();
+            var sources = RuntimeNavMesh.CollectSources(generated);
+            var navigationBounds = new Bounds(
+                new Vector3((Map.Width - 1) * 1.5f, 2, (Map.Height - 1) * 1.5f),
+                new Vector3(Map.Width * CellSize + 2, 8, Map.Height * CellSize + 2));
+            GuardNavigation = new RuntimeNavMesh(sources, navigationBounds, new NavMeshAgentProfile(1.8f, .42f));
+            InfiltratorNavigation = new RuntimeNavMesh(sources, navigationBounds, new NavMeshAgentProfile(.9f, .34f));
             Box("Entry — blue", Point((1, 1)) + Vector3.up * .015f, new Vector3(2.6f, .03f, 2.6f), MakeMaterial(new Color(.1f, .5f, 1)));
             Box("Exit — green", Exit + Vector3.up * .015f, new Vector3(2.6f, .03f, 2.6f), MakeMaterial(new Color(.2f, 1, .35f)));
             var playerObject = new GameObject("Player — WASD / Ctrl to crouch"); playerObject.transform.SetParent(generated);
             var playerController = playerObject.AddComponent<CharacterController>();
+            playerController.minMoveDistance = 0; // Keep small frame steps at high frame rates.
             playerController.height = 1.8f; playerController.center = Vector3.up * .9f; playerController.radius = .3f; playerController.stepOffset = .15f;
             var camera = new GameObject("Player camera").AddComponent<Camera>();
             camera.tag = "MainCamera"; camera.transform.SetParent(playerObject.transform, false);
@@ -83,20 +98,24 @@ namespace GoalDrivenAI.Samples.StealthMaze
             BuildRoleViews(camera);
             for (int i = 0; i < Scenario.GuardIds.Count; i++)
             {
-                int index = i * patrolCells.Count / Scenario.GuardIds.Count;
-                var go = new GameObject("Guard " + (i + 1)); go.transform.SetParent(generated); go.transform.position = Point(patrolCells[index]);
-                var motor = go.AddComponent<CharacterController>(); motor.height = 1.8f; motor.center = Vector3.up * .9f; motor.radius = .38f; motor.stepOffset = .1f;
+                int index = i * spawnCells.Count / Scenario.GuardIds.Count;
+                var go = new GameObject("Guard " + (i + 1)); go.transform.SetParent(generated); go.transform.position = Point(spawnCells[index]);
+                var motor = go.AddComponent<CharacterController>(); motor.minMoveDistance = 0; motor.height = 1.8f; motor.center = Vector3.up * .9f; motor.radius = .38f; motor.stepOffset = .1f;
                 var model = GameObject.CreatePrimitive(PrimitiveType.Capsule); model.name = "Guard body"; model.transform.SetParent(go.transform, false);
                 model.transform.localPosition = Vector3.up * .9f; model.transform.localScale = new Vector3(.7f, .9f, .7f);
                 // The controller is the sole collision shape. Disable the primitive collider before deferred destruction.
                 model.GetComponent<Collider>().enabled = false; Destroy(model.GetComponent<Collider>());
                 model.GetComponent<Renderer>().sharedMaterial = MakeMaterial(new Color(.25f, .65f, .9f));
-                Box("Facing visor", go.transform.position + new Vector3(0, 1.5f, .36f), new Vector3(.45f, .15f, .12f), cover).transform.SetParent(go.transform, true);
+                var visor = Box("Facing visor", go.transform.position + new Vector3(0, 1.5f, .36f), new Vector3(.45f, .15f, .12f), cover);
+                visor.transform.SetParent(go.transform, true);
+                // Decorative geometry must not block this guard's sight ray or other actors.
+                visor.GetComponent<Collider>().enabled = false; Destroy(visor.GetComponent<Collider>());
                 var sight = go.AddComponent<MazeSight>(); sight.range = sightRange; sight.fieldOfView = fieldOfView; sight.sensitivity = sightSensitivity;
                 var hearing = go.AddComponent<MazeHearing>(); hearing.range = hearingRange; hearing.sensitivity = hearingSensitivity;
                 var guard = go.AddComponent<MazeGuard>(); guard.shoutRadius = shoutRange;
-                guard.Initialize(this, new[] { Point(patrolCells[index]), Point(patrolCells[(index + 3) % patrolCells.Count]), Point(patrolCells[(index + 6) % patrolCells.Count]) });
+                guard.Initialize(this);
                 guard.SetIdentity(i);
+                go.AddComponent<PerspectiveDebug>().Bind(guard);
                 foreach (var other in guards)
                     Physics.IgnoreCollision(motor, other.GetComponent<CharacterController>());
                 guards.Add(guard);
@@ -119,13 +138,17 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         public void EmitNoise(Vector3 position, float radius)
         {
-            var noise = new MazeObservation(position, Time.timeAsDouble, EvidenceKind.Hearing);
+            float volume = radius <= 2 ? .14f : .35f;
+            var noise = new MazeObservation(position, Time.timeAsDouble, EvidenceKind.Hearing, clip: footstepSound, volume: volume);
+            AudioSource.PlayClipAtPoint(footstepSound, position, volume);
             foreach (var guard in guards) guard.Hear(position, radius, noise);
         }
         public void Shout(MazeGuard source, MazeObservation report)
         {
             // No relay: only the guard that actually sees the player shouts. The target position is a snapshot.
-            foreach (var guard in guards) if (guard != source) guard.Hear(source.transform.position, source.shoutRadius, report);
+            var audible = new MazeObservation(report.Position, report.Time, report.Kind, report.Confidence, report.Id, shoutSound, .5f);
+            AudioSource.PlayClipAtPoint(shoutSound, source.Eye.position, .5f);
+            foreach (var guard in guards) if (guard != source) guard.Hear(source.transform.position, source.shoutRadius, audible);
         }
         public void Capture()
         {
@@ -158,8 +181,25 @@ namespace GoalDrivenAI.Samples.StealthMaze
             Won = true; Message = "INFILTRATOR ESCAPED! All checkpoints reached.";
             Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
         }
+        // Self-contained placeholder sounds; hearing replays these same clips, without a voice asset dependency.
+        private static AudioClip Cue(string name, float seconds, float frequency)
+        {
+            const int rate = 16000;
+            var samples = new float[Mathf.CeilToInt(rate * seconds)];
+            for (int i = 0; i < samples.Length; i++)
+            {
+                float t = (float)i / rate;
+                samples[i] = Mathf.Sin(2 * Mathf.PI * frequency * t) * Mathf.Exp(-t * 24) * .6f;
+            }
+            var clip = AudioClip.Create(name, samples.Length, 1, rate, false); clip.SetData(samples, 0); return clip;
+        }
         private void OnDestroy()
         {
+            foreach (var perspective in GetComponentsInChildren<PerspectiveDebug>()) perspective.StopObserving();
+            if (footstepSound != null) Destroy(footstepSound);
+            if (shoutSound != null) Destroy(shoutSound);
+            GuardNavigation?.Dispose();
+            InfiltratorNavigation?.Dispose();
             RenderSettings.ambientMode = previousAmbientMode; RenderSettings.ambientLight = previousAmbient;
             foreach (var material in materials) if (material != null) Destroy(material);
         }

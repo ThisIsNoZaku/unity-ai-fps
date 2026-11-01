@@ -1,6 +1,7 @@
 using System;
 using GoalDrivenAI.Stealth;
 using UnityEngine;
+using GoalDrivenAI.Unity;
 
 namespace GoalDrivenAI.Samples.StealthMaze
 {
@@ -11,10 +12,12 @@ namespace GoalDrivenAI.Samples.StealthMaze
         public bool RoleSelected { get; private set; }
         public bool Running => RoleSelected && !Won;
         private Camera firstPerson, overhead;
+        private PerspectiveDebug watched;
         private Transform infiltratorVisual;
         private Renderer[] checkpointMarkers;
-        public Vector3 CheckpointPosition(int index)
-        { var p = Scenario.Checkpoints[index]; return new Vector3(p.X, p.Y, p.Z); }
+        public Vector3 LocationPosition(string id)
+        { var p = Scenario.Locations[id].Position; return new Vector3(p.X, p.Y, p.Z); }
+        public Vector3 CheckpointPosition(int index) => LocationPosition(Scenario.CheckpointLocations[index].Id);
         private static GoalDrivenAI.Position ToPosition(Vector3 p) => new GoalDrivenAI.Position(p.x, p.y, p.z);
 
         private void BuildRoleViews(Camera camera)
@@ -53,6 +56,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         public void JoinRole(MazeRole role)
         {
             if (Scenario == null || !Enum.IsDefined(typeof(MazeRole), role)) return;
+            if (watched != null) watched.StopObserving(); watched = null;
             Role = role; RoleSelected = true;
             firstPerson.enabled = role == MazeRole.Infiltrator; overhead.enabled = !firstPerson.enabled;
             infiltratorVisual.gameObject.SetActive(!firstPerson.enabled);
@@ -68,6 +72,19 @@ namespace GoalDrivenAI.Samples.StealthMaze
             if (accepted) Message = "Commander: Guard " + (guard + 1) + " — protect checkpoint " + (checkpoint + 1) + ".";
             return accepted;
         }
+        public bool OrderPatrol(int guard)
+        {
+            if (!Running || Role != MazeRole.Commander || guard < 0 || guard >= guards.Count || !Scenario.Patrol(MazeScenario.CommanderId, guard, guards[guard].patrolDwell)) return false;
+            Message = "Commander: Guard " + (guard + 1) + " — patrol checkpoints in order.";
+            return true;
+        }
+        public bool ObserveGuard(int index)
+        {
+            if (!RoleSelected || Role != MazeRole.Observer || index < 0 || index >= guards.Count) return false;
+            watched = guards[index].GetComponent<PerspectiveDebug>(); watched.BeginObserving();
+            Message = "Viewing Guard " + (index + 1) + " senses. Use Overhead to return to the map."; return true;
+        }
+        public void EndPerspective() { if (watched != null) watched.StopObserving(); watched = null; }
         private void Update()
         {
             if (Scenario == null) return;
@@ -76,6 +93,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
             infiltratorVisual.localPosition = Vector3.up * height * .5f;
             infiltratorVisual.localScale = new Vector3(.6f, height * .5f, .6f);
             if (!Running || capturePending) return;
+            Scenario.PumpPlans();
             var position = ToPosition(Player.transform.position);
             if (Scenario.Visit(MazeScenario.InfiltratorId, position))
             {
@@ -91,6 +109,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         public void ShowRoleMenu()
         {
+            if (watched != null) watched.StopObserving(); watched = null;
             RoleSelected = false; firstPerson.enabled = false; overhead.enabled = true;
             infiltratorVisual.gameObject.SetActive(true);
             Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
@@ -122,17 +141,29 @@ namespace GoalDrivenAI.Samples.StealthMaze
             }
             if (Role == MazeRole.Commander)
             {
-                GUI.Box(new Rect(16, 148, 360, 45 + guards.Count * 34), "COMMANDER — persistent checkpoint orders");
+                GUI.Box(new Rect(16, 148, 250 + Scenario.Checkpoints.Count * 50, 45 + guards.Count * 34), "COMMANDER — checkpoint defenses / patrols");
                 for (int i = 0; i < guards.Count; i++)
                 {
                     GUI.Label(new Rect(28, 180 + i * 34, 75, 28), "Guard " + (i + 1));
+                    if (GUI.Button(new Rect(108 + Scenario.Checkpoints.Count * 50, 180 + i * 34, 106, 28),
+                        (Scenario.IsPatrolling(i) ? "●" : "") + "Patrol CPs")) OrderPatrol(i);
                     for (int c = 0; c < Scenario.Checkpoints.Count; c++)
                         if (GUI.Button(new Rect(104 + c * 50, 180 + i * 34, 48, 28),
                             (Scenario.DefenseFor(i) == c ? "●" : "") + "CP" + (c + 1))) OrderProtection(i, c);
                 }
             }
-            Camera active = firstPerson.enabled ? firstPerson : overhead;
-            for (int i = 0; i < Scenario.Checkpoints.Count; i++)
+            if (Role == MazeRole.Observer)
+            {
+                GUI.Box(new Rect(16, 148, 110 + guards.Count * 94, 66), "OBSERVER — agent senses");
+                for (int i = 0; i < guards.Count; i++)
+                    if (GUI.Button(new Rect(24 + i * 94, 178, 90, 28),
+                        (watched == guards[i].GetComponent<PerspectiveDebug>() ? "● " : "") + "Guard " + (i + 1)))
+                        ObserveGuard(i);
+                if (GUI.Button(new Rect(24 + guards.Count * 94, 178, 90, 28), "Overhead"))
+                    EndPerspective();
+            }
+            Camera active = watched != null && watched.IsObserving ? watched.ViewCamera : firstPerson.enabled ? firstPerson : overhead;
+            for (int i = 0; i < Scenario.Checkpoints.Count && !(watched != null && watched.IsObserving); i++)
             {
                 Vector3 p = active.WorldToScreenPoint(CheckpointPosition(i) + Vector3.up * 3.2f);
                 if (p.z > 0) GUI.Label(new Rect(p.x - 35, Screen.height - p.y, 100, 24), "CP " + (i + 1) + (i < Scenario.Reached ? " ✓" : ""));
@@ -140,7 +171,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
             int row = 0;
             foreach (var guard in guards)
                 GUI.Label(new Rect(20, Screen.height - 28 * (guards.Count - row++), 540, 24), guard.name + " [guards] " + guard.Goal +
-                    " → CP " + (Scenario.DefenseFor(guard.GuardIndex) + 1) + (guard.Shouting ? " [SHOUT!]" : ""));
+                    " → CP " + (Scenario.DefenseFor(guard.GuardIndex) >= 0 ? Scenario.DefenseFor(guard.GuardIndex) + 1 : guard.PatrolCheckpointIndex + 1) + (guard.Shouting ? " [SHOUT!]" : ""));
             if (Role == MazeRole.Infiltrator && !Won) GUI.Label(new Rect(Screen.width / 2 - 4, Screen.height / 2 - 10, 20, 24), "+");
         }
     }

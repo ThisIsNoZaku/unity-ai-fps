@@ -13,9 +13,22 @@ namespace GoalDrivenAI.Unity
             public readonly Vector3 Position;
             public readonly float Radius;
             public readonly double ObservedAt;
-            public Sound(Vector3 position, float radius, double observedAt)
+            public readonly AudioClip Clip;
+            public readonly float Volume;
+            public readonly float Pitch;
+            public Sound(Vector3 position, float radius, double observedAt) : this(position, radius, observedAt, null) { }
+            public Sound(Vector3 position, float radius, double observedAt, AudioClip clip, float volume = 1, float pitch = 1)
+                : this(Guid.NewGuid().ToString("N"), position, radius, observedAt, clip, volume, pitch) { }
+            public Sound(string id, Vector3 position, float radius, double observedAt, AudioClip clip, float volume = 1, float pitch = 1)
             {
-                Id = Guid.NewGuid().ToString("N");
+                if (string.IsNullOrWhiteSpace(id) || id.Length > 256) throw new ArgumentException("Invalid sound ID.", nameof(id));
+                position.ToPosition();
+                if (float.IsNaN(radius) || float.IsInfinity(radius) || radius <= 0 || double.IsNaN(observedAt) || double.IsInfinity(observedAt) ||
+                    float.IsNaN(volume) || float.IsInfinity(volume) || volume < 0 || volume > 1 ||
+                    float.IsNaN(pitch) || float.IsInfinity(pitch) || pitch <= 0 || pitch > 3)
+                    throw new ArgumentOutOfRangeException(nameof(radius));
+                Clip = clip; Volume = volume; Pitch = pitch;
+                Id = id;
                 Position = position;
                 Radius = radius;
                 ObservedAt = observedAt;
@@ -25,12 +38,21 @@ namespace GoalDrivenAI.Unity
         public static event Action<Sound> Emitted;
         public static void Publish(Vector3 position, float radius, double observedAt)
         {
-            if (radius > 0 && !float.IsInfinity(radius)) Emitted?.Invoke(new Sound(position, radius, observedAt));
+            Publish(position, radius, observedAt, null);
+        }
+        public static void Publish(Sound sound)
+        {
+            if (sound.Radius > 0 && !string.IsNullOrEmpty(sound.Id)) Emitted?.Invoke(sound);
+        }
+        public static void Publish(Vector3 position, float radius, double observedAt, AudioClip clip, float volume = 1, float pitch = 1)
+        {
+            if (radius > 0 && !float.IsInfinity(radius) && !float.IsNaN(radius))
+                Publish(new Sound(position, radius, observedAt, clip, volume, pitch));
         }
     }
 
     [RequireComponent(typeof(Actor))]
-    public sealed class PerceptionSensor : MonoBehaviour
+    public sealed class PerceptionSensor : MonoBehaviour, IAgentPerspectiveSource
     {
         [SerializeField] private Transform eye;
         [SerializeField, Min(1)] private float range = 30;
@@ -45,6 +67,12 @@ namespace GoalDrivenAI.Unity
         private readonly HashSet<string> seenThisTick = new HashSet<string>(StringComparer.Ordinal);
         private Actor actor;
         private int offset;
+        public Transform Eye => eye != null ? eye : transform;
+        public bool VisionAvailable => isActiveAndEnabled && actor != null && actor.IsAlive;
+        public float VisionRange => range;
+        public float VisionFieldOfView => fieldOfView;
+        public int VisionMask => occlusionMask.value;
+        public event Action<PerceivedSound> Heard;
         public event Action<SensedContact> Observed;
         public event Action<string> Lost;
         public event Action<string> ConfirmedNeutralization;
@@ -66,7 +94,7 @@ namespace GoalDrivenAI.Unity
 
         public void Sense(double now)
         {
-            if (!actor.IsAlive) return;
+            if (!isActiveAndEnabled || !actor.IsAlive) return;
             int count = Physics.OverlapSphereNonAlloc(eye.position, range, candidates, candidateMask,
                 QueryTriggerInteraction.Ignore);
             int rays = 0;
@@ -119,6 +147,7 @@ namespace GoalDrivenAI.Unity
             if (distance > sound.Radius || Time.timeAsDouble - sound.ObservedAt > memorySeconds) return;
             double confidence = Math.Max(0.1, 1 - distance / sound.Radius);
             double uncertainty = Math.Max(1, distance * 0.2);
+            Heard?.Invoke(new PerceivedSound(sound, (float)confidence));
             // Sound never supplies a source actor identity.
             Observed?.Invoke(new SensedContact(sound.Id, null, "sound", sound.Position.ToPosition(),
                 sound.ObservedAt, sound.ObservedAt + memorySeconds, confidence, uncertainty, false));

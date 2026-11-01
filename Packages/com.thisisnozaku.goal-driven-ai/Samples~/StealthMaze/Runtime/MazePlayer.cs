@@ -1,5 +1,5 @@
 using UnityEngine;
-using System.Collections.Generic;
+using GoalDrivenAI.Unity;
 using GoalDrivenAI.Stealth;
 
 namespace GoalDrivenAI.Samples.StealthMaze
@@ -14,8 +14,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         [Min(.1f)] public float mouseSensitivity = 2;
         public bool Crouching { get; private set; }
         public string Faction => MazeScenario.InfiltratorFaction;
-        private IReadOnlyList<(int x, int y)> autoRoute;
-        private int autoStep, autoObjective = -1;
+        private NavMeshPathFollower navigation;
         private CharacterController controller;
         private Camera view;
         private MazeDemo world;
@@ -23,13 +22,16 @@ namespace GoalDrivenAI.Samples.StealthMaze
         private bool inputUnavailable;
         private readonly Collider[] clearance = new Collider[16];
         public void Initialize(MazeDemo demo, Camera camera)
-        { world = demo; view = camera; controller = GetComponent<CharacterController>(); }
+        {
+            world = demo; view = camera; controller = GetComponent<CharacterController>();
+            navigation = new NavMeshPathFollower(world.InfiltratorNavigation.Filter, new NavMeshPathOptions(horizontal: true));
+        }
 
         private void Update()
         {
             if (world == null || !world.RoleSelected) return;
             if (world.Role != MazeRole.Infiltrator) { if (world.Running) RunAutopilot(); return; }
-            autoRoute = null;
+            navigation.Clear();
             if (inputUnavailable) return;
             try { ReadInput(); }
             catch (System.InvalidOperationException)
@@ -69,21 +71,13 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         private void RunAutopilot()
         {
-            int objective = world.Scenario.Reached;
-            Vector3 destination = world.Scenario.AllReached ? world.Exit : world.CheckpointPosition(objective);
-            if (autoRoute == null || autoObjective != objective)
-            {
-                autoObjective = objective; autoStep = 0;
-                var start = world.Cell(transform.position);
-                var route = new List<(int x, int y)> { start };
-                route.AddRange(world.Map.Route(start, world.Cell(destination), true)); autoRoute = route;
-            }
-            // This small AI uses the same motor, collider, noise and objective checks as the human.
+            var destination = world.Scenario.NextObjective;
+            // The short-agent NavMesh includes low passages, with the same physical motor
+            // and noise as human crouching. NavMesh geometry includes all static cover.
             SetCrouching(true);
-            if (autoStep >= autoRoute.Count) { Move(Vector3.zero); return; }
-            Vector3 delta = world.Point(autoRoute[autoStep]) - transform.position; delta.y = 0;
-            if (delta.magnitude < .08f) { autoStep++; return; }
-            transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(delta), 250 * Time.deltaTime);
+            navigation.Next(transform.position, destination, out var delta);
+            if (delta.sqrMagnitude > .000001f)
+                transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(delta), 250 * Time.deltaTime);
             Move(Vector3.ClampMagnitude(delta / Mathf.Max(.001f, Time.deltaTime), crouchingSpeed));
         }
         /// <summary>Supports alternate input bindings while preserving standing clearance.</summary>
@@ -106,7 +100,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         { if (hit.collider.GetComponent<MazeGuard>() != null) world.Capture(); }
         public void ResetTo(Vector3 position)
         {
-            autoRoute = null; autoObjective = -1;
+            navigation.Clear();
             controller.enabled = false; transform.SetPositionAndRotation(position, Quaternion.identity); controller.enabled = true;
             controller.height = 1.8f; controller.center = Vector3.up * .9f;
             Crouching = false; pitch = 0; verticalSpeed = 0; nextStep = Time.time + 1;

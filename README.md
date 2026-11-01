@@ -66,7 +66,7 @@ Crouch behind cover or through infiltrator-only low passages; capture resets
 progress. Sight/hearing ranges and sensitivity are configurable. Set Active
 Input Handling to **Both** or **Input Manager (Old)** for first-person play.
 See `Samples~/StealthMaze/README.md` for controls, extension points and validation.
-This self-contained grid-navigation sample needs no NavMesh bake; the adapter
+This self-contained sample builds its Unity NavMeshes at runtime and needs no editor bake; the adapter
 setup below remains a separate integration path. Unity Play Mode validation is
 still required.
 
@@ -114,6 +114,23 @@ transform. Search reaches a remembered/captured point, dwells, then records
 checked evidence; exhausted attack searches report failure rather than success.
 Cover geometry and routes are rechecked; occupied slots retain renewable leases
 until departure, invalidation, death or disable.
+
+## Reusable locations, navigation and patrols
+
+`LocationRegistry` in `GoalDrivenAI.Navigation` captures a game's named locations.
+`PlanCompiler.CompilePatrol` expands patrol intent into ordinary Move, completion
+wait and dwell steps. Command plans support finite iterations or repetition until
+cancelled; each iteration revalidates authority and waits for verified results. `RuntimeNavMesh` and `NavMeshPathFollower` in
+`GoalDrivenAI.Unity` build navigation from the host's geometry and produce steering
+for its existing motor, with configurable agent profiles and explicit partial or
+unavailable results. They do not depend on the stealth sample or actor roles.
+
+See [the navigation integration guide](Packages/com.thisisnozaku.goal-driven-ai/Documentation~/Navigation.md)
+for setup, movement ownership, lifecycle and testing. The optional
+[PerspectiveDebug component](Packages/com.thisisnozaku.goal-driven-ai/Documentation~/PerspectiveDebug.md)
+lets observers view an agent's eye camera and hear only sensor-accepted audio.
+Maze topology, checkpoint
+progression and commander rules live in the sample's separate Core assembly.
 
 ## Integrating into an existing game
 

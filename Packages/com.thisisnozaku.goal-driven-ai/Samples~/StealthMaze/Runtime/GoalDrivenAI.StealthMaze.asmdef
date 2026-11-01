@@ -1,5 +1,9 @@
 {
   "name": "GoalDrivenAI.StealthMaze",
-  "references": ["GoalDrivenAI", "GoalDrivenAI.Unity"],
+  "references": [
+    "GoalDrivenAI",
+    "GoalDrivenAI.Unity",
+    "GoalDrivenAI.StealthMaze.Core"
+  ],
   "autoReferenced": true
 }

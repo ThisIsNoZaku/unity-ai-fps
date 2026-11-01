@@ -3,6 +3,8 @@ using GoalDrivenAI.Tactics;
 using GoalDrivenAI.Stealth;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.AI;
+using GoalDrivenAI.Unity;
 using UnityEngine.TestTools;
 
 namespace GoalDrivenAI.Samples.StealthMaze.Tests
@@ -79,17 +81,159 @@ namespace GoalDrivenAI.Samples.StealthMaze.Tests
             foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) Assert.That(guard.Faction, Is.EqualTo("guards"));
         }
 
+        [Test]
+        public void ObserverCanViewAgentSensesWithoutGainingCommandControls()
+        {
+            Assert.That(demo.ObserveGuard(0), Is.False);
+            demo.JoinRole(MazeRole.Observer);
+            Assert.That(demo.ObserveGuard(0), Is.True);
+            Assert.That(PerspectiveDebug.Active, Is.SameAs(demo.GetComponentsInChildren<MazeGuard>()[0].GetComponent<PerspectiveDebug>()));
+            Assert.That(demo.OrderPatrol(0), Is.False);
+            Assert.That(demo.OrderProtection(0, 1), Is.False);
+            demo.ShowRoleMenu();
+            Assert.That(PerspectiveDebug.Active, Is.Null);
+            demo.JoinRole(MazeRole.Observer); demo.ObserveGuard(1); demo.EndPerspective();
+            Assert.That(PerspectiveDebug.Active, Is.Null);
+        }
+
         [UnityTest]
         public IEnumerator AutonomousInfiltratorMovesInObserverModeAndPausesInRoleMenu()
         {
             demo.JoinRole(MazeRole.Observer);
             demo.Player.enabled = true;
             Vector3 before = demo.Player.transform.position;
-            yield return new WaitForSeconds(.5f);
+            float deadline = Time.time + 2;
+            while (Vector3.Distance(before, demo.Player.transform.position) <= .2f && Time.time < deadline)
+                yield return null;
             Assert.That(Vector3.Distance(before, demo.Player.transform.position), Is.GreaterThan(.2f));
             demo.ShowRoleMenu(); before = demo.Player.transform.position;
             yield return new WaitForSeconds(.2f);
             Assert.That(Vector3.Distance(before, demo.Player.transform.position), Is.LessThan(.001f));
+        }
+
+        [Test]
+        public void NavMeshesIncludeCoverAndRespectCrawlClearance()
+        {
+            var path = new NavMeshPath();
+            foreach (var guard in demo.GetComponentsInChildren<MazeGuard>())
+                for (int i = 0; i < demo.Scenario.Checkpoints.Count; i++)
+                {
+                    Assert.That(NavMesh.CalculatePath(guard.transform.position, demo.CheckpointPosition(i),
+                        demo.GuardNavigation.Filter, path), Is.True);
+                    Assert.That(path.status, Is.EqualTo(NavMeshPathStatus.PathComplete),
+                        guard.name + " cannot reach checkpoint " + (i + 1));
+                }
+            bool found = false;
+            for (int y = 0; y < demo.Map.Height; y++) for (int x = 0; x < demo.Map.Width; x++)
+                if (demo.Map[x, y] == 'c')
+                {
+                    found = true;
+                    Assert.That(NavMesh.SamplePosition(demo.Point((x, y)), out _, .1f,
+                        demo.InfiltratorNavigation.Filter), Is.True, "Crouched infiltrator needs a crawl route");
+                    Assert.That(NavMesh.SamplePosition(demo.Point((x, y)), out _, .1f,
+                        demo.GuardNavigation.Filter), Is.False, "Standing guards must not enter crawl passages");
+                }
+            Assert.That(found, Is.True);
+        }
+
+        [UnityTest]
+        public IEnumerator AutonomousInfiltratorNavigatesAroundCoverAndEscapes()
+        {
+            // Keep the actual generated colliders, but isolate navigation from capture/balance.
+            foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) guard.gameObject.SetActive(false);
+            demo.JoinRole(MazeRole.Observer); demo.Player.enabled = true;
+            float previousScale = Time.timeScale;
+            try
+            {
+                Time.timeScale = 5;
+                float deadline = Time.time + 240;
+                while (!demo.Won && Time.time < deadline) yield return null;
+                Assert.That(demo.Scenario.Reached, Is.EqualTo(demo.Scenario.Checkpoints.Count));
+                Assert.That(demo.Won, Is.True, "AI must pass crates, visit all checkpoints, and reach the exit");
+            }
+            finally { Time.timeScale = previousScale; }
+        }
+
+        [UnityTest]
+        public IEnumerator GuardsReachAssignedPostsAroundCover()
+        {
+            demo.JoinRole(MazeRole.Commander);
+            var guards = demo.GetComponentsInChildren<MazeGuard>();
+            demo.Player.GetComponent<CharacterController>().enabled = false;
+            for (int i = 0; i < guards.Length; i++)
+            {
+                foreach (var sense in guards[i].GetComponents<MazeSense>()) sense.enabled = false;
+                Assert.That(demo.OrderProtection(i, i % demo.Scenario.Checkpoints.Count), Is.True);
+                guards[i].enabled = true;
+            }
+            float previousScale = Time.timeScale;
+            try
+            {
+                Time.timeScale = 5;
+                float deadline = Time.time + 180;
+                bool arrived = false;
+                while (!arrived && Time.time < deadline)
+                {
+                    arrived = true;
+                    for (int i = 0; i < guards.Length; i++)
+                        if (Vector3.Distance(guards[i].transform.position,
+                            demo.CheckpointPosition(demo.Scenario.DefenseFor(i))) > .3f) arrived = false;
+                    yield return null;
+                }
+                Assert.That(arrived, Is.True, "All guards must reach their posts, rather than stall at cover");
+            }
+            finally { Time.timeScale = previousScale; }
+        }
+
+        [UnityTest]
+        public IEnumerator GuardsPatrolEveryCheckpointAndContinueAfterALap()
+        {
+            demo.JoinRole(MazeRole.Commander);
+            demo.Player.GetComponent<CharacterController>().enabled = false;
+            var guards = demo.GetComponentsInChildren<MazeGuard>();
+            var visits = new int[guards.Length];
+            var expected = new int[guards.Length];
+            for (int i = 0; i < guards.Length; i++)
+            {
+                foreach (var sense in guards[i].GetComponents<MazeSense>()) sense.enabled = false;
+                Assert.That(demo.OrderPatrol(i), Is.True);
+                expected[i] = guards[i].PatrolCheckpointIndex;
+                guards[i].enabled = true;
+            }
+            float previousScale = Time.timeScale;
+            try
+            {
+                Time.timeScale = 5;
+                float deadline = Time.time + 300;
+                bool finished = false;
+                while (!finished && Time.time < deadline)
+                {
+                    finished = true;
+                    for (int i = 0; i < guards.Length; i++)
+                    {
+                        var guard = guards[i];
+                        if (guard.PatrolVisits != visits[i])
+                        {
+                            Assert.That(guard.PatrolVisits, Is.EqualTo(visits[i] + 1), guard.name);
+                            Assert.That(Vector3.Distance(guard.transform.position,
+                                demo.CheckpointPosition(expected[i])), Is.LessThan(.3f), guard.name + " skipped a checkpoint");
+                            expected[i] = (expected[i] + 1) % demo.Scenario.CheckpointLocations.Count;
+                            Assert.That(guard.PatrolCheckpointIndex, Is.EqualTo(expected[i]));
+                            visits[i] = guard.PatrolVisits;
+                        }
+                        if (visits[i] <= demo.Scenario.CheckpointLocations.Count) finished = false;
+                    }
+                    yield return null;
+                }
+                for (int i = 0; i < guards.Length; i++)
+                    Assert.That(visits[i], Is.GreaterThan(demo.Scenario.CheckpointLocations.Count),
+                        guards[i].name + " did not complete a lap and continue");
+                Assert.That(demo.OrderProtection(0, 2), Is.True);
+                Assert.That(demo.Scenario.DefenseFor(0), Is.EqualTo(2));
+                demo.JoinRole(MazeRole.Observer);
+                Assert.That(demo.OrderPatrol(0), Is.False);
+            }
+            finally { Time.timeScale = previousScale; }
         }
 
         [Test]

@@ -1,7 +1,8 @@
 using System;
-using System.Collections.Generic;
 using GoalDrivenAI;
 using GoalDrivenAI.Stealth;
+using GoalDrivenAI.Language;
+using GoalDrivenAI.Commands;
 using GoalDrivenAI.Tactics;
 using GoalDrivenAI.Unity;
 using UnityEngine;
@@ -9,11 +10,12 @@ using UnityEngine;
 namespace GoalDrivenAI.Samples.StealthMaze
 {
     [RequireComponent(typeof(CharacterController))]
-    public sealed class MazeGuard : MonoBehaviour
+    public sealed class MazeGuard : MonoBehaviour, IAgentPerspectiveSource
     {
         [Min(.05f)] public float SenseInterval = .1f;
         [Min(.1f)] public float patrolSpeed = 2;
         [Min(.1f)] public float chaseSpeed = 3.2f;
+        [Min(0)] public float patrolDwell = 1.5f;
         [Min(.1f)] public float memorySeconds = 10;
         [Min(0)] public float shoutRadius = 16;
         [Min(.1f)] public float shoutCooldown = 2;
@@ -22,7 +24,23 @@ namespace GoalDrivenAI.Samples.StealthMaze
         public string Faction => MazeScenario.GuardsFaction;
         public int GuardIndex { get; private set; }
         public string Identity => world.Scenario.GuardIds[GuardIndex];
-        public void SetIdentity(int index) { GuardIndex = index; Goal = "defend"; }
+        public int PatrolCheckpointIndex => world?.Scenario.PatrolCheckpoint(GuardIndex) ?? 0;
+        public int PatrolVisits => world?.Scenario.PatrolVisits(GuardIndex) ?? 0;
+        public void SetIdentity(int index)
+        { GuardIndex = index; Goal = "defend"; }
+        private Transform perspectiveEye;
+        public Transform Eye => perspectiveEye != null ? perspectiveEye : transform;
+        private MazeSight Sight;
+        public bool VisionAvailable => isActiveAndEnabled && Sight != null && Sight.isActiveAndEnabled && Sight.sensitivity > 0;
+        public float VisionRange => Sight != null ? Sight.range : 0;
+        public float VisionFieldOfView => Sight != null ? Sight.fieldOfView : 1;
+        public int VisionMask => ~0;
+        public event Action<PerceivedSound> Heard;
+        public void PublishHeard(Vector3 origin, float radius, MazeObservation report, float gain)
+        {
+            if (report.Clip != null) Heard?.Invoke(new PerceivedSound(
+                new SoundBus.Sound(report.Id, origin, radius, Time.timeAsDouble, report.Clip, report.Volume), Mathf.Clamp01(gain)));
+        }
         public bool Shouting => Time.time < shoutUntil;
         private MazeDemo world;
         private MazeSense[] senses;
@@ -31,25 +49,26 @@ namespace GoalDrivenAI.Samples.StealthMaze
         private GoalSelector goals;
         private Renderer body;
         private Vector3 home;
-        private Vector3[] patrol;
-        private int patrolIndex, routeIndex;
-        private IReadOnlyList<(int x, int y)> route;
-        private (int x, int y) routeTarget = (-1, -1);
+        private NavMeshPathFollower navigation;
         private float nextSense, nextShout, shoutUntil, dwellUntil = -1;
         private Evidence target;
         private bool seeing;
 
-        public void Initialize(MazeDemo demo, Vector3[] points)
+        public void Initialize(MazeDemo demo)
         {
-            world = demo; patrol = points; home = transform.position;
+            world = demo; home = transform.position;
+            perspectiveEye = new GameObject("Guard sense eye").transform;
+            perspectiveEye.SetParent(transform, false); perspectiveEye.localPosition = Vector3.up * 1.55f;
+            navigation = new NavMeshPathFollower(world.GuardNavigation.Filter, new NavMeshPathOptions(horizontal: true));
             motor = GetComponent<CharacterController>(); body = GetComponentInChildren<Renderer>();
-            senses = GetComponents<MazeSense>(); ResetState();
+            senses = GetComponents<MazeSense>(); Sight = GetComponent<MazeSight>(); ResetState();
         }
         public void ResetState()
         {
             motor.enabled = false; transform.SetPositionAndRotation(home, Quaternion.identity); motor.enabled = true;
             var clock = new UnityClock(); beliefs = new BeliefStore(clock, 32); goals = new GoalSelector(clock);
-            target = null; seeing = false; patrolIndex = 0; route = null; routeTarget = (-1, -1);
+            target = null; seeing = false;
+            navigation.Clear();
             nextSense = 0; nextShout = 0; shoutUntil = 0; dwellUntil = -1; Goal = "defend";
             foreach (var sense in senses)
             { if (sense is MazeSight sight) sight.Clear(); if (sense is MazeHearing hearing) hearing.Clear(); }
@@ -61,7 +80,8 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         private void Update()
         {
-            if (world == null || !world.Running) return;
+            if (world == null) return;
+            if (!world.Running) return;
             if (Time.time >= nextSense)
             {
                 nextSense = Time.time + SenseInterval; seeing = false;
@@ -89,7 +109,8 @@ namespace GoalDrivenAI.Samples.StealthMaze
                 var interest = beliefs.Query("interest");
                 target = interest.CanSearch ? interest.Report : null;
                 Goal = goals.Select(new[] {
-                    new GoalCandidate("patrol", .2),
+                    new GoalCandidate("idle", .1),
+                    new GoalCandidate("patrol", .2, _ => world.Scenario.IsPatrolling(GuardIndex)),
                     new GoalCandidate("defend", .5, _ => world.Scenario.DefenseFor(GuardIndex) >= 0),
                     new GoalCandidate("investigate", .7, _ => target != null),
                     new GoalCandidate("chase", 1, _ => seeing && target != null, emergency: true)
@@ -99,14 +120,22 @@ namespace GoalDrivenAI.Samples.StealthMaze
                 else world.Scenario.Commands.ResumeAfterEmergency(Identity);
                 body.sharedMaterial.color = seeing ? new Color(1, .2f, .15f) : target != null ? new Color(1, .65f, .12f) : new Color(.25f, .65f, .9f);
             }
-            int defense = world.Scenario.DefenseFor(GuardIndex);
-            Vector3 destination = (Goal == "chase" || Goal == "investigate") && target?.Position != null
-                ? new Vector3(target.Position.Value.X, 0, target.Position.Value.Z)
-                : defense >= 0 ? world.CheckpointPosition(defense) : patrol[patrolIndex];
-            bool arrived = MoveToward(destination, Goal == "chase" ? chaseSpeed : patrolSpeed);
+            var order = world.Scenario.Commands.GetPrimary(Identity);
+            float speed = Goal == "chase" ? chaseSpeed : patrolSpeed;
+            bool arrived;
+            if ((Goal == "chase" || Goal == "investigate") && target?.Position != null)
+                arrived = MoveToward(new Vector3(target.Position.Value.X, 0, target.Position.Value.Z), speed);
+            else if (order?.Request.TargetId != null && world.Scenario.Locations.TryGetValue(order.Request.TargetId, out var location))
+                arrived = MoveToward(location, speed);
+            else arrived = Step(true, Vector3.zero, speed);
             if (arrived && !seeing)
             {
-                if (Goal == "patrol") { patrolIndex = (patrolIndex + 1) % patrol.Length; route = null; }
+                if (Goal == "patrol")
+                {
+                    transform.Rotate(0, 60 * Time.deltaTime, 0);
+                    if (order?.Request.Type == OrderType.Move && world.Scenario.CompleteNavigation(GuardIndex, transform.position.ToPosition()))
+                        navigation.Clear();
+                }
                 else if (Goal == "defend") transform.Rotate(0, 60 * Time.deltaTime, 0);
                 else if (target != null)
                 {
@@ -118,33 +147,21 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         private bool MoveToward(Vector3 destination, float speed)
         {
-            var cell = world.Cell(destination);
-            if (route == null || cell != routeTarget)
-            {
-                routeTarget = cell;
-                var start = world.Cell(transform.position);
-                var steps = new List<(int x, int y)> { start };
-                steps.AddRange(world.Map.Route(start, cell));
-                route = steps; routeIndex = 0;
-            }
-            if (routeIndex >= route.Count)
-            {
-                // Finish at the observed point within the cell, rather than stopping at its center.
-                // A crawl-only destination remains inaccessible even while it is visible.
-                if (!world.Map.Walkable(cell.x, cell.y)) return true;
-                Vector3 finalDelta = destination - transform.position; finalDelta.y = 0;
-                if (finalDelta.magnitude < .1f) return true;
-                Step(finalDelta, speed); return false;
-            }
-            Vector3 point = world.Point(route[routeIndex]);
-            Vector3 delta = point - transform.position; delta.y = 0;
-            if (delta.magnitude < .08f) { routeIndex++; return false; }
-            Step(delta, speed); return false;
+            var progress = navigation.Next(transform.position, destination, out var delta);
+            // Investigations may finish at the accessible edge of an observed location.
+            return Step(progress == NavigationProgress.Arrived || progress == NavigationProgress.Partial, delta, speed);
         }
-        private void Step(Vector3 delta, float speed)
+        private bool MoveToward(CatalogHandle location, float speed)
         {
-            transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(delta), 280 * Time.deltaTime);
+            var progress = navigation.Next(transform.position, location, out var delta);
+            return Step(progress == NavigationProgress.Arrived, delta, speed);
+        }
+        private bool Step(bool arrived, Vector3 delta, float speed)
+        {
+            if (delta.sqrMagnitude > .000001f)
+                transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(delta), 280 * Time.deltaTime);
             motor.Move(Vector3.ClampMagnitude(delta, speed * Time.deltaTime) + Vector3.down * 2 * Time.deltaTime);
+            return arrived;
         }
         private void OnControllerColliderHit(ControllerColliderHit hit)
         { if (hit.collider.GetComponent<MazePlayer>() != null) world.Capture(); }

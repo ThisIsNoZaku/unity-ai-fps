@@ -13,7 +13,8 @@ namespace GoalDrivenAI.Samples.StealthMaze
             float strength = (float)Audibility.Strength(Vector3.Distance(observer.transform.position, origin), radius, range, sensitivity);
             // A fresh direct sighting takes priority in the guard. Preserve report identity/time across communication.
             if (strength <= 0 || (pending.HasValue && pending.Value.Time > report.Time)) return;
-            pending = new MazeObservation(report.Position, report.Time, report.Kind, strength, report.Id);
+            pending = new MazeObservation(report.Position, report.Time, report.Kind, strength, report.Id, report.Clip, report.Volume);
+            observer.PublishHeard(origin, radius, report, strength);
         }
         public override bool Observe(MazeGuard observer, MazePlayer player, out MazeObservation observation)
         {

@@ -1,0 +1,8 @@
+{
+  "name": "GoalDrivenAI.StealthMaze.Core",
+  "rootNamespace": "GoalDrivenAI.Stealth",
+  "references": [
+    "GoalDrivenAI"
+  ],
+  "autoReferenced": true
+}
