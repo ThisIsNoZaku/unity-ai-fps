@@ -54,6 +54,19 @@ idempotency, cancellation, dependency failures and native command integration.
 The core targets .NET Standard 2.1 / C# 9; headless tests do **not** compile
 Unity-dependent adapters.
 
+## Playable stealth maze sample
+
+Import **Stealth Maze** from this package's Samples section in Unity Package
+Manager, open `StealthMaze.unity`, and press Play. Escape a generated maze while
+guards patrol, see/hear you, shout sightings to nearby guards and search copied
+last-known positions. Crouch behind cover or through player-only low passages;
+touching a guard resets the encounter. Sight/hearing ranges and sensitivity are
+configurable. Set Active Input Handling to **Both** or **Input Manager (Old)**.
+See `Samples~/StealthMaze/README.md` for controls, extension points and validation.
+This self-contained grid-navigation sample needs no NavMesh bake; the adapter
+setup below remains a separate integration path. Unity Play Mode validation is
+still required.
+
 ## One-guard Unity setup
 
 Use a Unity 6 project (Unity 6000.3 is the intended validation target). In Package
@@ -66,7 +79,8 @@ is pinned independently to Newtonsoft.Json 13.0.4. No provider keys are included
 
 1. Create a small floor, walls/occluders and colliders. Bake a NavMesh using your
    project's compatible Unity navigation authoring package. Navigation baking,
-   player movement, assets and a prebuilt scene are not bundled.
+   player movement and assets are not bundled for this adapter setup. The
+   separate stealth sample supplies its own generated scene.
 2. Add an `AIScheduler` and a `CommandHost` to scene objects. Populate the host's
    actor list. Set the player identity/faction; hostile orders are rejected.
 3. Create an AI Profile with **Assets → Create → Goal Driven AI → Profile**.
@@ -362,7 +376,7 @@ targets are configurable measurement targets, **not measured guarantees**.
 The scheduler caps dispatch work between agents; a synchronous physics query
 cannot be preempted halfway through.
 
-This package does not supply a complete FPS, player controller, authored
+This package does not supply a complete FPS, production player controller or
 encounter, door/alarm/animation adapters, room/portal acoustics, squad role
 allocation, multi-anchor search coverage, a concrete speech/model transport,
 provider failover, full save-game integration, a production clarification UI,

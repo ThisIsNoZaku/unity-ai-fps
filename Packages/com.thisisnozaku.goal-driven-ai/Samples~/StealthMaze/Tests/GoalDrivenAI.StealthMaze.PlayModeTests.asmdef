@@ -1,0 +1,7 @@
+{
+  "name": "GoalDrivenAI.StealthMaze.PlayModeTests",
+  "references": ["GoalDrivenAI", "GoalDrivenAI.StealthMaze"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "autoReferenced": false
+}
