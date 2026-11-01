@@ -57,11 +57,14 @@ Unity-dependent adapters.
 ## Playable stealth maze sample
 
 Import **Stealth Maze** from this package's Samples section in Unity Package
-Manager, open `StealthMaze.unity`, and press Play. Escape a generated maze while
-guards patrol, see/hear you, shout sightings to nearby guards and search copied
-last-known positions. Crouch behind cover or through player-only low passages;
-touching a guard resets the encounter. Sight/hearing ranges and sensitivity are
-configurable. Set Active Input Handling to **Both** or **Input Manager (Old)**.
+Manager, open `StealthMaze.unity`, and press Play. Choose Infiltrator, Guards
+Commander or Observer. The infiltrator must reach
+numbered checkpoints before escaping; the guards' commander assigns persistent
+checkpoint defenses through validated orders. Other roles use an AI infiltrator.
+Guards see/hear, share local sightings and search copied last-known positions.
+Crouch behind cover or through infiltrator-only low passages; capture resets
+progress. Sight/hearing ranges and sensitivity are configurable. Set Active
+Input Handling to **Both** or **Input Manager (Old)** for first-person play.
 See `Samples~/StealthMaze/README.md` for controls, extension points and validation.
 This self-contained grid-navigation sample needs no NavMesh bake; the adapter
 setup below remains a separate integration path. Unity Play Mode validation is

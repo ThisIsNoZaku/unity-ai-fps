@@ -1,16 +1,18 @@
 using System.Collections.Generic;
 using GoalDrivenAI.Stealth;
 using GoalDrivenAI.Tactics;
+using GoalDrivenAI.Unity;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace GoalDrivenAI.Samples.StealthMaze
 {
     /// <summary>Builds the shipped demo scene at play time; no assets or navigation bake required.</summary>
-    public sealed class MazeDemo : MonoBehaviour
+    public sealed partial class MazeDemo : MonoBehaviour
     {
         public int seed = 42;
         [Range(1, 6)] public int enemyCount = 4;
+        [Range(2, 5)] public int checkpointCount = 3;
         [Header("Enemy senses (copied to spawned components)")]
         [Min(0)] public float sightRange = 15;
         [Range(1, 360)] public float fieldOfView = 105;
@@ -22,8 +24,8 @@ namespace GoalDrivenAI.Samples.StealthMaze
         public MazePlayer Player { get; private set; }
         public Vector3 Exit => Point((Map.Width - 2, Map.Height - 2));
         public bool Won { get; private set; }
-        public string Message { get; set; } = "Click to begin. Reach the green exit.";
-        private const float CellSize = 3;
+        public string Message { get; set; } = "Choose a role to join the maze.";
+        private const float CellSize = MazeScenario.CellSize;
         private readonly List<MazeGuard> guards = new List<MazeGuard>();
         private readonly List<Material> materials = new List<Material>();
         private Transform generated;
@@ -38,6 +40,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         private void Start()
         {
             Map = new MazeMap(seed);
+            Scenario = new MazeScenario(new UnityClock(), Map, Mathf.Clamp(enemyCount, 1, 6), Mathf.Clamp(checkpointCount, 2, 5));
             generated = new GameObject("Generated stealth maze").transform; generated.SetParent(transform, false);
             previousAmbientMode = RenderSettings.ambientMode; previousAmbient = RenderSettings.ambientLight;
             RenderSettings.ambientMode = AmbientMode.Flat; RenderSettings.ambientLight = new Color(.48f, .53f, .65f);
@@ -77,9 +80,10 @@ namespace GoalDrivenAI.Samples.StealthMaze
             camera.backgroundColor = new Color(.05f, .08f, .12f); camera.clearFlags = CameraClearFlags.SolidColor;
             camera.gameObject.AddComponent<AudioListener>();
             Player = playerObject.AddComponent<MazePlayer>(); Player.Initialize(this, camera); Player.ResetTo(Point((1, 1)));
-            for (int i = 0; i < enemyCount; i++)
+            BuildRoleViews(camera);
+            for (int i = 0; i < Scenario.GuardIds.Count; i++)
             {
-                int index = i * patrolCells.Count / enemyCount;
+                int index = i * patrolCells.Count / Scenario.GuardIds.Count;
                 var go = new GameObject("Guard " + (i + 1)); go.transform.SetParent(generated); go.transform.position = Point(patrolCells[index]);
                 var motor = go.AddComponent<CharacterController>(); motor.height = 1.8f; motor.center = Vector3.up * .9f; motor.radius = .38f; motor.stepOffset = .1f;
                 var model = GameObject.CreatePrimitive(PrimitiveType.Capsule); model.name = "Guard body"; model.transform.SetParent(go.transform, false);
@@ -92,10 +96,12 @@ namespace GoalDrivenAI.Samples.StealthMaze
                 var hearing = go.AddComponent<MazeHearing>(); hearing.range = hearingRange; hearing.sensitivity = hearingSensitivity;
                 var guard = go.AddComponent<MazeGuard>(); guard.shoutRadius = shoutRange;
                 guard.Initialize(this, new[] { Point(patrolCells[index]), Point(patrolCells[(index + 3) % patrolCells.Count]), Point(patrolCells[(index + 6) % patrolCells.Count]) });
+                guard.SetIdentity(i);
                 foreach (var other in guards)
                     Physics.IgnoreCollision(motor, other.GetComponent<CharacterController>());
                 guards.Add(guard);
             }
+            BuildCheckpoints();
             Physics.SyncTransforms(); resetGrace = Time.time + 1;
         }
         private Material MakeMaterial(Color color)
@@ -123,40 +129,34 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         public void Capture()
         {
-            if (Won || Time.time < resetGrace) return;
+            if (!Running || Time.time < resetGrace) return;
             capturePending = true;
         }
         private void LateUpdate()
         {
             // Defer controller resets until all collision callbacks have returned.
             if (!capturePending) return;
-            capturePending = false; captures++; Restart();
+            capturePending = false; captures++; ResetEncounter();
             Message = "Caught! Back at the entry. Crouch to hide and make less noise.";
         }
         public void Restart()
         {
+            if (!RoleSelected || Role == MazeRole.Observer) return;
+            ResetEncounter();
+        }
+        private void ResetEncounter()
+        {
             Won = false; capturePending = false; resetGrace = Time.time + 1; Player.ResetTo(Point((1, 1)));
+            Scenario.Reset();
+            RefreshCheckpoints();
             foreach (var guard in guards) guard.ResetState();
-            Physics.SyncTransforms(); Message = "Reach the green exit. Watch corners and listen for guards.";
+            Physics.SyncTransforms(); Message = "Visit every numbered checkpoint, then reach the green exit.";
         }
         public void Win()
         {
-            if (capturePending) return;
-            Won = true; Message = "ESCAPED! Press R to play again.";
+            if (capturePending || !Running || !Scenario.CanEscape(MazeScenario.InfiltratorId, ToPosition(Player.transform.position))) return;
+            Won = true; Message = "INFILTRATOR ESCAPED! All checkpoints reached.";
             Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
-        }
-        private void OnGUI()
-        {
-            if (Player == null) return;
-            GUI.Box(new Rect(16, 16, 570, 133), "STEALTH MAZE");
-            GUI.Label(new Rect(30, 43, 540, 24), Message);
-            GUI.Label(new Rect(30, 68, 540, 24), "WASD move • Mouse look • Ctrl / C crouch • R restart • Esc cursor");
-            GUI.Label(new Rect(30, 93, 540, 24), "Teal openings: crouch only. Amber crates: crouch cover. Green floor: exit.");
-            GUI.Label(new Rect(30, 118, 540, 24), (Player.Crouching ? "CROUCHED • quiet" : "STANDING • footsteps carry") + "     Captures: " + captures);
-            int row = 0;
-            foreach (var guard in guards)
-                GUI.Label(new Rect(20, Screen.height - 28 * (guards.Count - row++), 360, 24), guard.name + "  " + guard.Goal + (guard.Shouting ? "  [SHOUT: PLAYER SPOTTED!]" : ""));
-            if (!Won) GUI.Label(new Rect(Screen.width / 2 - 4, Screen.height / 2 - 10, 20, 24), "+");
         }
         private void OnDestroy()
         {

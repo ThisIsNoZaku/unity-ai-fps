@@ -41,6 +41,7 @@ MonoBehaviour:
   m_EditorClassIdentifier:
   seed: 42
   enemyCount: 4
+  checkpointCount: 3
   sightRange: 15
   fieldOfView: 105
   sightSensitivity: 1

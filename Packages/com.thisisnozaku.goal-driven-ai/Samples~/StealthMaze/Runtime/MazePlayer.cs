@@ -1,4 +1,6 @@
 using UnityEngine;
+using System.Collections.Generic;
+using GoalDrivenAI.Stealth;
 
 namespace GoalDrivenAI.Samples.StealthMaze
 {
@@ -11,6 +13,9 @@ namespace GoalDrivenAI.Samples.StealthMaze
         [Min(0)] public float crouchingNoiseRadius = 1.5f;
         [Min(.1f)] public float mouseSensitivity = 2;
         public bool Crouching { get; private set; }
+        public string Faction => MazeScenario.InfiltratorFaction;
+        private IReadOnlyList<(int x, int y)> autoRoute;
+        private int autoStep, autoObjective = -1;
         private CharacterController controller;
         private Camera view;
         private MazeDemo world;
@@ -22,7 +27,10 @@ namespace GoalDrivenAI.Samples.StealthMaze
 
         private void Update()
         {
-            if (world == null || inputUnavailable) return;
+            if (world == null || !world.RoleSelected) return;
+            if (world.Role != MazeRole.Infiltrator) { if (world.Running) RunAutopilot(); return; }
+            autoRoute = null;
+            if (inputUnavailable) return;
             try { ReadInput(); }
             catch (System.InvalidOperationException)
             {
@@ -34,6 +42,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         private void ReadInput()
         {
+            if (Input.GetKeyDown(KeyCode.Tab)) { world.ShowRoleMenu(); return; }
             if (Input.GetKeyDown(KeyCode.R)) { world.Restart(); return; }
             if (Input.GetKeyDown(KeyCode.Escape)) { Cursor.lockState = CursorLockMode.None; Cursor.visible = true; }
             if (Input.GetMouseButtonDown(0) && !world.Won) { Cursor.lockState = CursorLockMode.Locked; Cursor.visible = false; }
@@ -45,15 +54,37 @@ namespace GoalDrivenAI.Samples.StealthMaze
             bool crouch = Crouching;
             Vector3 movement = Vector3.ClampMagnitude(transform.forward * Input.GetAxisRaw("Vertical") +
                 transform.right * Input.GetAxisRaw("Horizontal"), 1) * (crouch ? crouchingSpeed : walkingSpeed);
+            Move(movement);
+        }
+        private void Move(Vector3 movement)
+        {
             verticalSpeed = controller.isGrounded ? -2 : verticalSpeed + Physics.gravity.y * Time.deltaTime;
             Vector3 before = transform.position;
             controller.Move((movement + Vector3.up * verticalSpeed) * Time.deltaTime);
             if ((transform.position - before).sqrMagnitude > .000001f && movement.sqrMagnitude > .01f && Time.time >= nextStep)
             {
-                nextStep = Time.time + (crouch ? .65f : .42f);
-                world.EmitNoise(transform.position, crouch ? crouchingNoiseRadius : walkingNoiseRadius);
+                nextStep = Time.time + (Crouching ? .65f : .42f);
+                world.EmitNoise(transform.position, Crouching ? crouchingNoiseRadius : walkingNoiseRadius);
             }
-            if (Vector3.Distance(transform.position, world.Exit) < 1.1f) world.Win();
+        }
+        private void RunAutopilot()
+        {
+            int objective = world.Scenario.Reached;
+            Vector3 destination = world.Scenario.AllReached ? world.Exit : world.CheckpointPosition(objective);
+            if (autoRoute == null || autoObjective != objective)
+            {
+                autoObjective = objective; autoStep = 0;
+                var start = world.Cell(transform.position);
+                var route = new List<(int x, int y)> { start };
+                route.AddRange(world.Map.Route(start, world.Cell(destination), true)); autoRoute = route;
+            }
+            // This small AI uses the same motor, collider, noise and objective checks as the human.
+            SetCrouching(true);
+            if (autoStep >= autoRoute.Count) { Move(Vector3.zero); return; }
+            Vector3 delta = world.Point(autoRoute[autoStep]) - transform.position; delta.y = 0;
+            if (delta.magnitude < .08f) { autoStep++; return; }
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(delta), 250 * Time.deltaTime);
+            Move(Vector3.ClampMagnitude(delta / Mathf.Max(.001f, Time.deltaTime), crouchingSpeed));
         }
         /// <summary>Supports alternate input bindings while preserving standing clearance.</summary>
         public void SetCrouching(bool crouch)
@@ -75,6 +106,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         { if (hit.collider.GetComponent<MazeGuard>() != null) world.Capture(); }
         public void ResetTo(Vector3 position)
         {
+            autoRoute = null; autoObjective = -1;
             controller.enabled = false; transform.SetPositionAndRotation(position, Quaternion.identity); controller.enabled = true;
             controller.height = 1.8f; controller.center = Vector3.up * .9f;
             Crouching = false; pitch = 0; verticalSpeed = 0; nextStep = Time.time + 1;

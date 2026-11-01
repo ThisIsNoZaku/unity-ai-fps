@@ -18,7 +18,11 @@ namespace GoalDrivenAI.Samples.StealthMaze
         [Min(0)] public float shoutRadius = 16;
         [Min(.1f)] public float shoutCooldown = 2;
         [Min(0)] public float searchDwell = 2;
-        public string Goal { get; private set; } = "patrol";
+        public string Goal { get; private set; } = "defend";
+        public string Faction => MazeScenario.GuardsFaction;
+        public int GuardIndex { get; private set; }
+        public string Identity => world.Scenario.GuardIds[GuardIndex];
+        public void SetIdentity(int index) { GuardIndex = index; Goal = "defend"; }
         public bool Shouting => Time.time < shoutUntil;
         private MazeDemo world;
         private MazeSense[] senses;
@@ -46,7 +50,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
             motor.enabled = false; transform.SetPositionAndRotation(home, Quaternion.identity); motor.enabled = true;
             var clock = new UnityClock(); beliefs = new BeliefStore(clock, 32); goals = new GoalSelector(clock);
             target = null; seeing = false; patrolIndex = 0; route = null; routeTarget = (-1, -1);
-            nextSense = 0; nextShout = 0; shoutUntil = 0; dwellUntil = -1; Goal = "patrol";
+            nextSense = 0; nextShout = 0; shoutUntil = 0; dwellUntil = -1; Goal = "defend";
             foreach (var sense in senses)
             { if (sense is MazeSight sight) sight.Clear(); if (sense is MazeHearing hearing) hearing.Clear(); }
         }
@@ -57,7 +61,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         }
         private void Update()
         {
-            if (world == null || world.Won) return;
+            if (world == null || !world.Running) return;
             if (Time.time >= nextSense)
             {
                 nextSense = Time.time + SenseInterval; seeing = false;
@@ -86,17 +90,24 @@ namespace GoalDrivenAI.Samples.StealthMaze
                 target = interest.CanSearch ? interest.Report : null;
                 Goal = goals.Select(new[] {
                     new GoalCandidate("patrol", .2),
+                    new GoalCandidate("defend", .5, _ => world.Scenario.DefenseFor(GuardIndex) >= 0),
                     new GoalCandidate("investigate", .7, _ => target != null),
                     new GoalCandidate("chase", 1, _ => seeing && target != null, emergency: true)
                 }, new GoalContext(0)).GoalId ?? "patrol";
+                if (Goal == "chase" || Goal == "investigate")
+                    world.Scenario.Commands.SuspendForEmergency(Identity, "Responding to sensory evidence");
+                else world.Scenario.Commands.ResumeAfterEmergency(Identity);
                 body.sharedMaterial.color = seeing ? new Color(1, .2f, .15f) : target != null ? new Color(1, .65f, .12f) : new Color(.25f, .65f, .9f);
             }
-            Vector3 destination = Goal != "patrol" && target?.Position != null
-                ? new Vector3(target.Position.Value.X, 0, target.Position.Value.Z) : patrol[patrolIndex];
+            int defense = world.Scenario.DefenseFor(GuardIndex);
+            Vector3 destination = (Goal == "chase" || Goal == "investigate") && target?.Position != null
+                ? new Vector3(target.Position.Value.X, 0, target.Position.Value.Z)
+                : defense >= 0 ? world.CheckpointPosition(defense) : patrol[patrolIndex];
             bool arrived = MoveToward(destination, Goal == "chase" ? chaseSpeed : patrolSpeed);
             if (arrived && !seeing)
             {
                 if (Goal == "patrol") { patrolIndex = (patrolIndex + 1) % patrol.Length; route = null; }
+                else if (Goal == "defend") transform.Rotate(0, 60 * Time.deltaTime, 0);
                 else if (target != null)
                 {
                     if (dwellUntil < 0) dwellUntil = Time.time + searchDwell;

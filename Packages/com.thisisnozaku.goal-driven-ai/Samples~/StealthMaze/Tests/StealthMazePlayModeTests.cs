@@ -1,5 +1,6 @@
 using System.Collections;
 using GoalDrivenAI.Tactics;
+using GoalDrivenAI.Stealth;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -16,6 +17,7 @@ namespace GoalDrivenAI.Samples.StealthMaze.Tests
         {
             demo = new GameObject("Test maze").AddComponent<MazeDemo>();
             yield return null;
+            demo.JoinRole(MazeRole.Infiltrator);
             demo.Player.enabled = false;
             foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) guard.enabled = false;
         }
@@ -54,8 +56,50 @@ namespace GoalDrivenAI.Samples.StealthMaze.Tests
             captor.GetComponent<CharacterController>().Move(Vector3.back);
             yield return null;
             Assert.That(Vector3.Distance(demo.Player.transform.position, demo.Point((1, 1))), Is.LessThan(.01f));
-            foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) Assert.That(guard.Goal, Is.EqualTo("patrol"));
+            foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) Assert.That(guard.Goal, Is.EqualTo("defend"));
             Assert.That(demo.Won, Is.False);
+        }
+
+        [Test]
+        public void RoleSelectionChangesCameraAndRejectsObserverOrdersAndRestarts()
+        {
+            demo.JoinRole(MazeRole.Commander);
+            Assert.That(demo.OrderProtection(0, 2), Is.True);
+            Assert.That(demo.Scenario.DefenseFor(0), Is.EqualTo(2));
+            demo.Scenario.Visit(MazeScenario.InfiltratorId, demo.Scenario.Checkpoints[0]);
+            demo.JoinRole(MazeRole.Observer);
+            Assert.That(demo.OrderProtection(0, 1), Is.False);
+            demo.Restart();
+            Assert.That(demo.Scenario.Reached, Is.EqualTo(1));
+            Assert.That(demo.Scenario.DefenseFor(0), Is.EqualTo(2));
+            foreach (var camera in demo.Player.GetComponentsInChildren<Camera>()) Assert.That(camera.enabled, Is.False);
+            demo.JoinRole(MazeRole.Infiltrator);
+            Assert.That(demo.Player.GetComponentInChildren<Camera>().enabled, Is.True);
+            Assert.That(demo.Player.Faction, Is.EqualTo("infiltrator"));
+            foreach (var guard in demo.GetComponentsInChildren<MazeGuard>()) Assert.That(guard.Faction, Is.EqualTo("guards"));
+        }
+
+        [UnityTest]
+        public IEnumerator AutonomousInfiltratorMovesInObserverModeAndPausesInRoleMenu()
+        {
+            demo.JoinRole(MazeRole.Observer);
+            demo.Player.enabled = true;
+            Vector3 before = demo.Player.transform.position;
+            yield return new WaitForSeconds(.5f);
+            Assert.That(Vector3.Distance(before, demo.Player.transform.position), Is.GreaterThan(.2f));
+            demo.ShowRoleMenu(); before = demo.Player.transform.position;
+            yield return new WaitForSeconds(.2f);
+            Assert.That(Vector3.Distance(before, demo.Player.transform.position), Is.LessThan(.001f));
+        }
+
+        [Test]
+        public void ExitCannotWinBeforeAllCheckpointsAreVisited()
+        {
+            Teleport(demo.Player, demo.Exit); demo.Win(); Assert.That(demo.Won, Is.False);
+            foreach (var checkpoint in demo.Scenario.Checkpoints)
+                demo.Scenario.Visit(MazeScenario.InfiltratorId, checkpoint);
+            demo.Win(); Assert.That(demo.Won, Is.True);
+            demo.Restart(); Assert.That(demo.Won, Is.False); Assert.That(demo.Scenario.Reached, Is.Zero);
         }
 
         [Test]

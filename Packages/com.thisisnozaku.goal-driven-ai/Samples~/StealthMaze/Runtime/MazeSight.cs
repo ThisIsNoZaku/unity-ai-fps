@@ -13,6 +13,7 @@ namespace GoalDrivenAI.Samples.StealthMaze
         public override bool Observe(MazeGuard observer, MazePlayer player, out MazeObservation observation)
         {
             observation = default;
+            if (observer.Faction == player.Faction) return false;
             Vector3 origin = observer.transform.position + Vector3.up * 1.55f;
             Vector3 target = player.transform.position + Vector3.up * (player.Crouching ? 0.65f : 1.5f);
             Vector3 delta = target - origin;

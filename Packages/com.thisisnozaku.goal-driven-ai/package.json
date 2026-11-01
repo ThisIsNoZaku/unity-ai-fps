@@ -10,7 +10,7 @@
   "samples": [
     {
       "displayName": "Stealth Maze",
-      "description": "Playable maze escape with patrol, configurable sight/hearing, local alerts, crouch cover and player-only crawl passages.",
+      "description": "Three-role stealth maze: infiltrator, guards commander or observer; checkpoint objectives, validated defense orders, configurable senses and crawl passages.",
       "path": "Samples~/StealthMaze"
     }
   ]
