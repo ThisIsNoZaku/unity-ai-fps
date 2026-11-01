@@ -1,0 +1,7 @@
+{
+  "name": "GoalDrivenAI.Navigation.PlayModeTests",
+  "references": ["GoalDrivenAI", "GoalDrivenAI.Unity"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "autoReferenced": false
+}

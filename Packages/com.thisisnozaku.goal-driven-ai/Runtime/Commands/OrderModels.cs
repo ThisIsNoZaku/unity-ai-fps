@@ -231,6 +231,19 @@ namespace GoalDrivenAI.Commands
         }
     }
 
+    public sealed class RetiredPlanIteration
+    {
+        public string PlanHash { get; }
+        public string Issuer { get; }
+        public long Iteration { get; }
+        public RetiredPlanIteration(string planHash, string issuer, long iteration)
+        {
+            if (string.IsNullOrWhiteSpace(planHash) || planHash.Length != 64 || planHash.Any(c => !Uri.IsHexDigit(c)) || iteration < 0)
+                throw new ArgumentException("Invalid plan iteration.");
+            PlanHash = planHash; Issuer = OrderRequest.Required(issuer, nameof(issuer)); Iteration = iteration;
+        }
+    }
+
     /// <summary>Immutable, serializer-friendly snapshot. Restore before processing new host events.</summary>
     public sealed class CommandState
     {
@@ -239,9 +252,12 @@ namespace GoalDrivenAI.Commands
         public IReadOnlyList<BatchResult> Batches { get; }
         public IReadOnlyList<OrderFeedback> Feedback { get; }
         public IReadOnlyList<string> EmergencyRecipients { get; }
+        public IReadOnlyList<RetiredPlanIteration> RetiredIterations { get; }
         public CommandState(IEnumerable<OrderRecord> orders, IEnumerable<PolicyRecord> policies,
-            IEnumerable<BatchResult> batches, IEnumerable<OrderFeedback> feedback, IEnumerable<string> emergencyRecipients)
+            IEnumerable<BatchResult> batches, IEnumerable<OrderFeedback> feedback, IEnumerable<string> emergencyRecipients,
+            IEnumerable<RetiredPlanIteration>? retiredIterations = null)
         {
+            RetiredIterations = Array.AsReadOnly((retiredIterations ?? Array.Empty<RetiredPlanIteration>()).ToArray());
             Orders = Array.AsReadOnly(orders.ToArray()); Policies = Array.AsReadOnly(policies.ToArray());
             Batches = Array.AsReadOnly(batches.ToArray()); Feedback = Array.AsReadOnly(feedback.ToArray());
             EmergencyRecipients = Array.AsReadOnly(emergencyRecipients.ToArray());

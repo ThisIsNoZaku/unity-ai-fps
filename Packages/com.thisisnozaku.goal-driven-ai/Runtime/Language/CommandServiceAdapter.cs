@@ -6,7 +6,7 @@ using GoalDrivenAI.Commands;
 
 namespace GoalDrivenAI.Language
 {
-    public sealed class CommandServiceAdapter : ICommandPlanSink, IPlanNodeRuntime
+    public sealed class CommandServiceAdapter : ICommandPlanSink, IPlanNodeRuntime, IPlanIterationRuntime
     {
         private readonly CommandService commands;
         private readonly ICommandContextSource contexts;
@@ -18,6 +18,7 @@ namespace GoalDrivenAI.Language
         private readonly Func<CommandContext, ValidatedPlanNode, bool>? signal;
         private readonly Dictionary<string, double> timers = new Dictionary<string, double>();
         private readonly Dictionary<string, DependencyPlanExecutor> executions = new Dictionary<string, DependencyPlanExecutor>();
+        private readonly Dictionary<string, long> iterations = new Dictionary<string, long>();
         private readonly HashSet<string> accepted = new HashSet<string>(StringComparer.Ordinal);
         public CommandServiceAdapter(CommandService commands, ICommandContextSource contexts, IClock clock,
             IMainThreadScheduler scheduler, IPlanJournal journal,
@@ -35,7 +36,15 @@ namespace GoalDrivenAI.Language
             if (commands.Save().Batches.Any(b => b.RequestId == plan.Context.RequestKey))
             { reason = "Request already recorded."; return false; }
             foreach (var key in executions.Where(p => p.Value.Finished).Select(p => p.Key).ToArray()) executions.Remove(key);
-            if (executions.Count >= 32 || accepted.Count >= 4096) { reason = "Execution capacity."; return false; }
+            var recipients = plan.Nodes.Where(n => n.Order?.Primary == true).SelectMany(n => n.Recipients).ToHashSet();
+            var replacements = executions.Values.Where(e => !e.Finished && e.Plan.Iterations != 1 &&
+                e.Plan.Nodes.Any(n => n.Order?.Primary == true && n.Recipients.Any(recipients.Contains))).ToArray();
+            foreach (var old in replacements)
+                foreach (string recipient in old.Plan.Context.Recipients.Where(recipients.Contains))
+                    if (commands.Hierarchy.GetAuthority(plan.Context.Issuer, recipient) <
+                        commands.Hierarchy.GetAuthority(old.Plan.Context.Issuer, recipient))
+                    { reason = "A higher-authority looping plan owns this recipient."; return false; }
+            if (executions.Count - replacements.Length >= 32 || accepted.Count >= 4096) { reason = "Execution capacity."; return false; }
             if (!contexts.IsCurrent(plan.Context)) { reason = "Stale context."; return false; }
             try
             {
@@ -46,6 +55,7 @@ namespace GoalDrivenAI.Language
                 var accepted = commands.CommitBatch(plan.Context.Issuer, plan.Context.RequestKey, orders, policies);
                 reason = accepted.Reason;
                 if (!accepted.Accepted) return false;
+                foreach (var old in replacements) { old.Cancel(); executions.Remove(old.Plan.Hash); }
                 this.accepted.Add(plan.Context.RequestKey);
                 executions.Add(plan.Hash, new DependencyPlanExecutor(plan, clock, this, scheduler, journal));
                 return true;
@@ -56,6 +66,32 @@ namespace GoalDrivenAI.Language
         {
             MainThread();
             foreach (var execution in executions.Values.ToArray()) execution.Pump();
+        }
+        public DependencyPlanExecutor? GetExecution(string hash) => executions.TryGetValue(hash, out var execution) ? execution : null;
+        public bool Cancel(string hash)
+        {
+            MainThread();
+            if (!executions.TryGetValue(hash, out var execution)) return false;
+            execution.Cancel(); return true;
+        }
+        public bool BeginIteration(ValidatedCommandPlan plan, long iteration, out string reason)
+        {
+            MainThread(); iterations[plan.Hash] = iteration;
+            if (!contexts.IsCurrent(plan.Context)) { reason = "Stale context."; return false; }
+            var orders = plan.Nodes.Where(n => n.Kind == PlanNodeKind.IssueOrder)
+                .SelectMany(n => n.Recipients.Select(r => Order(plan, n, r))).ToArray();
+            // Validate each cycle atomically; only the root request needs a persisted dedup batch.
+            var result = commands.ValidateBatch(plan.Context.Issuer,
+                plan.Context.RequestKey + "_iteration_" + iteration, orders);
+            reason = result.Reason; return result.Accepted;
+        }
+        public void EndIteration(ValidatedCommandPlan plan, long iteration)
+        {
+            MainThread();
+            commands.RetireIteration(plan.Context.Issuer, plan.Hash, iteration,
+                plan.Nodes.Where(n => n.Kind == PlanNodeKind.IssueOrder)
+                    .SelectMany(n => n.Recipients.Select(r => Id(plan, n, r))));
+            foreach (var node in plan.Nodes) timers.Remove(NodeKey(plan, node));
         }
         public bool Revalidate(ValidatedCommandPlan plan, ValidatedPlanNode node, out string reason)
         {
@@ -87,7 +123,7 @@ namespace GoalDrivenAI.Language
             }
             if (node.Kind == PlanNodeKind.WaitForResult)
             {
-                if (node.Predicate == ResultPredicate.TimerElapsed) timers[plan.Hash + node.Id] = clock.Now + node.Duration!.Value;
+                if (node.Predicate == ResultPredicate.TimerElapsed) timers[NodeKey(plan, node)] = clock.Now + node.Duration!.Value;
                 return Poll(plan, node);
             }
             if (node.Kind == PlanNodeKind.ReportResult) report?.Invoke(node.Report!);
@@ -98,7 +134,7 @@ namespace GoalDrivenAI.Language
             MainThread();
             if (node.Kind != PlanNodeKind.WaitForResult) return new NodeExecutionResult(PlanNodeStatus.Succeeded);
             if (node.Predicate == ResultPredicate.TimerElapsed)
-                return new NodeExecutionResult(clock.Now >= timers[plan.Hash + node.Id] ? PlanNodeStatus.Succeeded : PlanNodeStatus.Running);
+                return new NodeExecutionResult(clock.Now >= timers[NodeKey(plan, node)] ? PlanNodeStatus.Succeeded : PlanNodeStatus.Running);
             if (node.Predicate == ResultPredicate.SignalReceived)
                 return new NodeExecutionResult(signal?.Invoke(plan.Context, node) == true ? PlanNodeStatus.Succeeded : PlanNodeStatus.Running);
             var observed = plan.Nodes.First(n => n.Id == node.ObservedNode);
@@ -129,8 +165,11 @@ namespace GoalDrivenAI.Language
             if (node.Kind == PlanNodeKind.IssueOrder)
                 foreach (var recipient in node.Recipients) commands.Cancel(plan.Context.Issuer, Id(plan, node, recipient));
         }
-        private static string Id(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient) =>
-            plan.Hash + "_" + node.Id + "_" + recipient;
+        private string Prefix(ValidatedCommandPlan plan) => plan.Iterations == 1 ? plan.Hash :
+            plan.Hash + "_iteration_" + (iterations.TryGetValue(plan.Hash, out var iteration) ? iteration : 0)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        private string NodeKey(ValidatedCommandPlan plan, ValidatedPlanNode node) => Prefix(plan) + "_" + node.Id;
+        private string Id(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient) => NodeKey(plan, node) + "_" + recipient;
         private OrderRequest Order(ValidatedCommandPlan plan, ValidatedPlanNode node, string recipient)
         {
             if (!Enum.GetNames(typeof(OrderType)).Contains(node.Order!.Name)) throw new ArgumentException("Unknown native order.");
@@ -141,7 +180,7 @@ namespace GoalDrivenAI.Language
             bool holdFire = effective.HoldFire || plan.Nodes.Any(n => n.Kind == PlanNodeKind.SetPolicy &&
                 n.Recipients.Contains(recipient) && n.Policy == CommandPolicy.Engagement && n.Value == PolicyValue.HoldFire);
             return new OrderRequest(Id(plan, node, recipient), recipient, type,
-                node.Target?.Position, node.Target?.Kind == HandleKind.Actor ? node.Target.Id : null,
+                node.Target?.Position, node.Target?.Id,
                 new OrderConstraints(holdFire, node.Target?.RegionId ?? effective.RegionId,
                     effective.MaxRisk, effective.ExpiresAt, completion), deliveryTimeout: node.Timeout);
         }

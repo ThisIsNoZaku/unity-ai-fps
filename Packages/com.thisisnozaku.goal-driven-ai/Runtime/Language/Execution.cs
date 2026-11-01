@@ -27,6 +27,12 @@ namespace GoalDrivenAI.Language
         NodeExecutionResult Poll(ValidatedCommandPlan plan, ValidatedPlanNode node);
         void Cancel(ValidatedCommandPlan plan, ValidatedPlanNode node);
     }
+    /// <summary>Loop runtimes must scope native work to each iteration and release finished work.</summary>
+    public interface IPlanIterationRuntime
+    {
+        bool BeginIteration(ValidatedCommandPlan plan, long iteration, out string reason);
+        void EndIteration(ValidatedCommandPlan plan, long iteration);
+    }
     public sealed class PlanTrace
     {
         public string PlanHash { get; }
@@ -34,8 +40,10 @@ namespace GoalDrivenAI.Language
         public PlanNodeStatus Status { get; }
         public double Time { get; }
         public string Detail { get; }
-        public PlanTrace(string hash, string node, PlanNodeStatus status, double time, string detail)
+        public long Iteration { get; }
+        public PlanTrace(string hash, string node, PlanNodeStatus status, double time, string detail, long iteration = 0)
         {
+            Iteration = iteration;
             PlanHash = hash; NodeId = node; Status = status; Time = time;
             Detail = detail.Length <= 256 ? detail : detail.Substring(0, 256);
         }
@@ -112,17 +120,42 @@ namespace GoalDrivenAI.Language
         private readonly IPlanJournal journal;
         private readonly Dictionary<string, PlanNodeStatus> states;
         private readonly Dictionary<string, double> deadlines = new Dictionary<string, double>(StringComparer.Ordinal);
+        private bool stopped, restartPending, iterationStarted, iterationEnded;
+        private bool Repeating => plan.Iterations != 1;
+        public ValidatedCommandPlan Plan => plan;
+        public long Iteration { get; private set; }
+        public long CompletedIterations { get; private set; }
         public IReadOnlyDictionary<string, PlanNodeStatus> States => new ReadOnlyDictionary<string, PlanNodeStatus>(states);
-        public bool Finished => states.Values.All(s => s != PlanNodeStatus.Pending && s != PlanNodeStatus.Running);
+        public bool Finished => stopped || (states.Values.All(Terminal) &&
+            (!states.Values.All(s => s == PlanNodeStatus.Succeeded) ||
+             (plan.Iterations > 0 && CompletedIterations >= plan.Iterations)));
         public DependencyPlanExecutor(ValidatedCommandPlan plan, IClock clock, IPlanNodeRuntime runtime,
             IMainThreadScheduler scheduler, IPlanJournal journal)
         {
             this.plan = plan; this.clock = clock; this.runtime = runtime; this.scheduler = scheduler; this.journal = journal;
+            if (Repeating && !(runtime is IPlanIterationRuntime))
+                throw new ArgumentException("Loop plans require an iteration-aware runtime.", nameof(runtime));
             states = plan.Nodes.ToDictionary(n => n.Id, n => PlanNodeStatus.Pending, StringComparer.Ordinal);
         }
         public void Pump()
         {
             RequireMainThread();
+            if (Finished) return;
+            if (restartPending)
+            {
+                Iteration++; restartPending = false; iterationStarted = iterationEnded = false; deadlines.Clear();
+                foreach (var node in plan.Nodes) states[node.Id] = PlanNodeStatus.Pending;
+            }
+            if (Repeating && !iterationStarted)
+            {
+                iterationStarted = true;
+                try
+                {
+                    if (!((IPlanIterationRuntime)runtime).BeginIteration(plan, Iteration, out var reason))
+                    { Fail(plan.Nodes[0], reason); return; }
+                }
+                catch (Exception) { Fail(plan.Nodes[0], "Iteration initialization failed."); return; }
+            }
             foreach (var node in plan.Nodes)
             {
                 var status = states[node.Id];
@@ -142,9 +175,7 @@ namespace GoalDrivenAI.Language
                     else
                     {
                         if (clock.Now >= deadlines[node.Id])
-                        {
-                            runtime.Cancel(plan, node); Fail(node, "Node deadline."); continue;
-                        }
+                        { TryCancel(node); Fail(node, "Node deadline."); continue; }
                         result = runtime.Poll(plan, node);
                     }
                     if (result.Status == PlanNodeStatus.Failed) Fail(node, result.Detail);
@@ -152,32 +183,60 @@ namespace GoalDrivenAI.Language
                 }
                 catch (Exception) { Fail(node, "Node runtime failed."); }
             }
+            if (states.Values.All(s => s == PlanNodeStatus.Succeeded))
+            {
+                CompletedIterations++;
+                try { EndIteration(); }
+                catch (Exception) { Fail(plan.Nodes[plan.Nodes.Count - 1], "Iteration cleanup failed."); return; }
+                // At most one iteration per pump: an unbounded loop cannot monopolize a frame.
+                restartPending = plan.Iterations == 0 || CompletedIterations < plan.Iterations;
+            }
+            else if (Repeating && states.Values.All(Terminal)) TryEndIteration();
         }
+        private static bool Terminal(PlanNodeStatus state) => state != PlanNodeStatus.Pending && state != PlanNodeStatus.Running;
         private void Fail(ValidatedPlanNode node, string detail)
         {
+            TryCancel(node);
             Change(node, PlanNodeStatus.Failed, detail);
-            if (node.FailurePolicy == PlanFailurePolicy.AbortPlan)
+            if (Repeating || node.FailurePolicy == PlanFailurePolicy.AbortPlan)
+            {
+                CancelIssuedOrders();
                 foreach (var other in plan.Nodes.Where(n => states[n.Id] == PlanNodeStatus.Pending || states[n.Id] == PlanNodeStatus.Running))
                 {
                     if (states[other.Id] == PlanNodeStatus.Running) TryCancel(other);
                     Change(other, PlanNodeStatus.Blocked, "Plan aborted.");
                 }
+            }
         }
         public void Cancel()
         {
-            RequireMainThread();
+            RequireMainThread(); stopped = true; restartPending = false;
+            CancelIssuedOrders();
             foreach (var node in plan.Nodes.Where(n => states[n.Id] == PlanNodeStatus.Pending || states[n.Id] == PlanNodeStatus.Running))
             {
                 if (states[node.Id] == PlanNodeStatus.Running) TryCancel(node);
                 Change(node, PlanNodeStatus.Cancelled, "Cancelled.");
             }
+            TryEndIteration();
         }
+        private void CancelIssuedOrders()
+        {
+            foreach (var node in plan.Nodes.Where(n => n.Kind == PlanNodeKind.IssueOrder && states[n.Id] != PlanNodeStatus.Pending))
+                TryCancel(node);
+        }
+        private void EndIteration()
+        {
+            if (!Repeating || iterationEnded || !iterationStarted) return;
+            iterationEnded = true; ((IPlanIterationRuntime)runtime).EndIteration(plan, Iteration);
+        }
+        private void TryEndIteration()
+        { try { EndIteration(); } catch (Exception) { /* Stop even when retired work cannot be released. */ } }
         private void TryCancel(ValidatedPlanNode node)
         { try { runtime.Cancel(plan, node); } catch (Exception) { /* Cancellation must still block descendants. */ } }
         private void Change(ValidatedPlanNode node, PlanNodeStatus status, string detail)
         {
             states[node.Id] = status;
-            journal.RecordOutcome(new PlanTrace(plan.Hash, node.Id, status, clock.Now, detail));
+            journal.RecordOutcome(new PlanTrace(plan.Hash, node.Id, status, clock.Now, detail, Iteration));
         }
         private void RequireMainThread()
         {

@@ -15,6 +15,8 @@ namespace GoalDrivenAI.Unity
         [SerializeField, Min(1)] private float range = 40;
         [SerializeField, Range(0, 10)] private float inaccuracyDegrees = 1;
         [SerializeField] private LayerMask firingMask = ~0;
+        [SerializeField] private AudioClip shotSound;
+        [SerializeField, Range(0, 1)] private float shotVolume = 1;
         private Actor actor;
         private AimController aim;
         private WeaponState state;
@@ -56,7 +58,8 @@ namespace GoalDrivenAI.Unity
                 victim.ApplyDamage(damage, result.point);
                 if (wasAlive && !victim.IsAlive) ConfirmedNeutralization?.Invoke(victim.Id);
             }
-            SoundBus.Publish(aim.Origin, range, Time.timeAsDouble);
+            SoundBus.Publish(aim.Origin, range, Time.timeAsDouble, shotSound, shotVolume);
+            if (shotSound != null) AudioSource.PlayClipAtPoint(shotSound, aim.Origin, shotVolume);
             return true;
         }
 

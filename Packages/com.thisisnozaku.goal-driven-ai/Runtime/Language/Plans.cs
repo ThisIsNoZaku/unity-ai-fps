@@ -48,16 +48,19 @@ namespace GoalDrivenAI.Language
         public string Name { get; }
         public bool RequiresTarget { get; }
         public bool Primary { get; }
+        public bool Repeatable { get; }
         public double DefaultTimeout { get; }
         public PlanFailurePolicy FailurePolicy { get; }
+        public OrderDefinition(string name, bool requiresTarget, bool primary, double defaultTimeout, PlanFailurePolicy failurePolicy)
+            : this(name, requiresTarget, primary, defaultTimeout, failurePolicy, false) { }
         public OrderDefinition(string name, bool requiresTarget, bool primary,
-            double defaultTimeout, PlanFailurePolicy failurePolicy)
+            double defaultTimeout, PlanFailurePolicy failurePolicy, bool repeatable)
         {
             Name = CatalogHandle.RequireId(name);
             if (!Enum.IsDefined(typeof(PlanFailurePolicy), failurePolicy) ||
                 !Finite(defaultTimeout) || defaultTimeout <= 0 || defaultTimeout > 300)
                 throw new ArgumentOutOfRangeException(nameof(defaultTimeout));
-            RequiresTarget = requiresTarget; Primary = primary;
+            RequiresTarget = requiresTarget; Primary = primary; Repeatable = repeatable;
             DefaultTimeout = defaultTimeout; FailurePolicy = failurePolicy;
         }
         internal static bool Finite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
@@ -66,10 +69,12 @@ namespace GoalDrivenAI.Language
     public sealed class CommandCatalog
     {
         public string Version { get; }
+        public bool AllowLooping { get; }
         public IReadOnlyDictionary<string, OrderDefinition> Orders { get; }
-        public CommandCatalog(string version, IEnumerable<OrderDefinition> orders)
+        public CommandCatalog(string version, IEnumerable<OrderDefinition> orders) : this(version, orders, false) { }
+        public CommandCatalog(string version, IEnumerable<OrderDefinition> orders, bool allowLooping)
         {
-            Version = CatalogHandle.RequireId(version);
+            Version = CatalogHandle.RequireId(version); AllowLooping = allowLooping;
             Orders = new ReadOnlyDictionary<string, OrderDefinition>(
                 orders.ToDictionary(o => o.Name, StringComparer.Ordinal));
             if (Orders.Count == 0 || Orders.Count > 64) throw new ArgumentException("Catalog size.");
@@ -146,10 +151,12 @@ namespace GoalDrivenAI.Language
         public CommandContext Context { get; }
         public string RequestId => Context.RequestId;
         public IReadOnlyList<ValidatedPlanNode> Nodes { get; }
+        public int Iterations { get; } // 0 repeats until cancelled; otherwise total iteration count.
         public string CanonicalJson { get; }
         public string Hash { get; }
-        internal ValidatedCommandPlan(string version, CommandContext context, ValidatedPlanNode[] nodes)
+        internal ValidatedCommandPlan(string version, CommandContext context, ValidatedPlanNode[] nodes, int iterations = 1)
         {
+            Iterations = iterations;
             CatalogVersion = version; Context = context; Nodes = Array.AsReadOnly(nodes);
             CanonicalJson = PlanCompiler.Canonical(this).ToString(Formatting.None);
             using var sha = SHA256.Create();
@@ -198,8 +205,10 @@ namespace GoalDrivenAI.Language
                     foreach (var p in node.Properties().Where(p => p.Value.Type == JTokenType.Null ||
                         (p.Name == "recipients" && kind != PlanNodeKind.IssueOrder && kind != PlanNodeKind.SetPolicy)).ToArray()) p.Remove();
                 }
-                var result = Compile(new JObject { ["schemaVersion"] = saved["schemaVersion"],
-                    ["catalogVersion"] = saved["catalogVersion"], ["nodes"] = nodes }.ToString(Formatting.None), context);
+                var proposal = new JObject { ["schemaVersion"] = saved["schemaVersion"],
+                    ["catalogVersion"] = saved["catalogVersion"], ["nodes"] = nodes };
+                if (saved["iterations"] != null) proposal["iterations"] = saved["iterations"];
+                var result = Compile(proposal.ToString(Formatting.None), context);
                 if (!result.Success || result.Plan!.Hash != expectedHash || result.Plan.CanonicalJson != canonicalJson)
                     return new PlanCompilation(null, "Saved plan binding mismatch.");
                 return result;
@@ -222,7 +231,15 @@ namespace GoalDrivenAI.Language
                     CommentHandling = CommentHandling.Load
                 });
                 if (root.Descendants().Any(t => t.Type == JTokenType.Comment) || reader.Read()) Fail("Only one JSON object is allowed.");
-                Fields(root, "schemaVersion", "catalogVersion", "nodes");
+                Fields(root, "schemaVersion", "catalogVersion", "nodes", "iterations");
+                int iterations = 1;
+                if (root["iterations"] != null)
+                {
+                    if (root["iterations"]!.Type != JTokenType.Integer || (long)root["iterations"]! < 0 ||
+                        (long)root["iterations"]! > 1024) Fail("Invalid iteration limit.");
+                    iterations = (int)root["iterations"]!;
+                }
+                if (iterations != 1 && !catalog.AllowLooping) Fail("Catalog does not authorize looping.");
                 if (root["schemaVersion"]?.Type != JTokenType.Integer ||
                     (long)root["schemaVersion"]! != ValidatedCommandPlan.SchemaVersion) Fail("Schema version.");
                 if (String(root, "catalogVersion") != catalog.Version) Fail("Catalog version.");
@@ -251,11 +268,54 @@ namespace GoalDrivenAI.Language
                             nodes[i].Recipients.Intersect(nodes[j].Recipients).Any() &&
                             !CompletionSequenced(nodes[i], nodes[j], map) && !CompletionSequenced(nodes[j], nodes[i], map))
                             Fail("Conflicting unsequenced primary orders.");
-                return new PlanCompilation(new ValidatedCommandPlan(catalog.Version, context, sorted.ToArray()), null);
+                if (iterations != 1)
+                {
+                    if (nodes.Any(n => n.Kind == PlanNodeKind.SetPolicy)) Fail("Persistent policies cannot be repeated.");
+                    foreach (var issue in nodes.Where(n => n.Kind == PlanNodeKind.IssueOrder))
+                        if (issue.Order?.Repeatable != true || !nodes.Any(wait => wait.ObservedNode == issue.Id &&
+                            (wait.Predicate == ResultPredicate.Completed || wait.Predicate == ResultPredicate.OrderCompleted)))
+                            Fail("Loop orders require repeatable definitions and verified completion waits.");
+                    if (!nodes.Any(n => n.Kind == PlanNodeKind.WaitForResult)) Fail("Loop body needs a blocking wait.");
+                }
+                return new PlanCompilation(new ValidatedCommandPlan(catalog.Version, context, sorted.ToArray(), iterations), null);
             }
             catch (Exception ex) when (ex is JsonException || ex is ArgumentException || ex is InvalidOperationException ||
                 ex is OverflowException || ex is FormatException)
             { return new PlanCompilation(null, ex.Message); }
+        }
+
+        /// <summary>Expand a high-level patrol into ordinary Move/completion/dwell nodes.</summary>
+        public PlanCompilation CompilePatrol(CommandContext context, IEnumerable<string> locationIds,
+            double dwellSeconds = 1.5, double navigationTimeout = 120, int iterations = 0)
+        {
+            if (context == null || locationIds == null) throw new ArgumentNullException();
+            var stops = locationIds.Take(17).ToArray();
+            if (!OrderDefinition.Finite(dwellSeconds) || dwellSeconds < 0 || dwellSeconds >= 300 ||
+                !OrderDefinition.Finite(navigationTimeout) || navigationTimeout <= 0 || navigationTimeout > 300 ||
+                stops.Length == 0 || stops.Length * (dwellSeconds > 0 ? 3 : 2) > 16 ||
+                !catalog.Orders.ContainsKey("Move")) return new PlanCompilation(null, "Invalid patrol parameters.");
+            if (stops.Any(id => id == null || !context.Handles.TryGetValue(id, out var h) || h.Kind != HandleKind.Location))
+                return new PlanCompilation(null, "Unknown or unauthorized patrol location.");
+            var nodes = new JArray(); string? previous = null;
+            for (int i = 0; i < stops.Length; i++)
+            {
+                string move = "move_" + i, wait = "arrived_" + i, dwell = "dwell_" + i;
+                nodes.Add(new JObject { ["id"] = move, ["type"] = "IssueOrder",
+                    ["dependsOn"] = previous == null ? new JArray() : new JArray(previous),
+                    ["recipients"] = new JArray(context.Recipients), ["order"] = "Move", ["target"] = stops[i],
+                    ["timeout"] = navigationTimeout });
+                nodes.Add(new JObject { ["id"] = wait, ["type"] = "WaitForResult", ["dependsOn"] = new JArray(move),
+                    ["observedNode"] = move, ["predicate"] = "Completed", ["timeout"] = navigationTimeout });
+                previous = wait;
+                if (dwellSeconds > 0)
+                {
+                    nodes.Add(new JObject { ["id"] = dwell, ["type"] = "WaitForResult", ["dependsOn"] = new JArray(wait),
+                        ["predicate"] = "TimerElapsed", ["duration"] = dwellSeconds, ["timeout"] = Math.Min(300, dwellSeconds + 1) });
+                    previous = dwell;
+                }
+            }
+            return Compile(new JObject { ["schemaVersion"] = ValidatedCommandPlan.SchemaVersion,
+                ["catalogVersion"] = catalog.Version, ["iterations"] = iterations, ["nodes"] = nodes }.ToString(Formatting.None), context);
         }
 
         private ValidatedPlanNode ParseNode(JToken token, CommandContext context)
@@ -372,7 +432,7 @@ namespace GoalDrivenAI.Language
         internal static JObject Canonical(ValidatedCommandPlan plan)
         {
             var context = plan.Context;
-            return new JObject {
+            var canonical = new JObject {
                 ["schemaVersion"] = ValidatedCommandPlan.SchemaVersion, ["catalogVersion"] = plan.CatalogVersion,
                 ["context"] = new JObject {
                     ["issuer"] = context.Issuer, ["requestId"] = context.RequestId, ["session"] = context.Session, ["revision"] = context.Revision,
@@ -390,6 +450,9 @@ namespace GoalDrivenAI.Language
                     ["timeout"] = n.Timeout, ["failurePolicy"] = n.FailurePolicy.ToString(), ["duration"] = n.Duration
                 }))
             };
+            // Keep canonical JSON/hashes for existing single-pass plans unchanged.
+            if (plan.Iterations != 1) canonical["iterations"] = plan.Iterations;
+            return canonical;
         }
     }
     public sealed class CommandPlanCompiler : PlanCompiler

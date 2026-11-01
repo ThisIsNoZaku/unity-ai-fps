@@ -73,7 +73,7 @@ namespace GoalDrivenAI.Unity
         public double Now => Time.timeAsDouble;
     }
 
-    internal static class Coordinates
+    public static class Coordinates
     {
         public static Position ToPosition(this Vector3 value) => new Position(value.x, value.y, value.z);
         public static Vector3 ToVector(this Position value) => new Vector3(value.X, value.Y, value.Z);

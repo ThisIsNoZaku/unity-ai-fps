@@ -18,6 +18,7 @@ namespace GoalDrivenAI.Commands
         private readonly Dictionary<string, BatchResult> batches = new Dictionary<string, BatchResult>();
         private readonly List<OrderFeedback> feedback = new List<OrderFeedback>();
         private readonly HashSet<string> emergency = new HashSet<string>();
+        private readonly Dictionary<string, RetiredPlanIteration> retiredIterations = new Dictionary<string, RetiredPlanIteration>();
         private long nextSequence;
 
         public CommandService(IClock clock, ICommandValidator validator, AuthorityGraph? hierarchy = null)
@@ -38,6 +39,7 @@ namespace GoalDrivenAI.Commands
         public bool CanSubmit(string caller, OrderRequest request, out string reason)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
+            if (IsRetired(request.OrderId)) return Reject("Plan iteration is retired.", out reason);
             if (orders.TryGetValue(request.OrderId, out var known))
             {
                 reason = known.Issuer == caller ? known.Reason : "Order ID belongs to another issuer.";
@@ -49,6 +51,7 @@ namespace GoalDrivenAI.Commands
         public OrderResult Submit(string caller, OrderRequest request)
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
+            if (IsRetired(request.OrderId)) return new OrderResult(false, "Plan iteration is retired.");
             if (orders.TryGetValue(request.OrderId, out var known))
                 return new OrderResult(known.Issuer == caller && known.Status != OrderStatus.Rejected,
                     known.Issuer == caller ? known.Reason : "Order ID belongs to another issuer.", known);
@@ -434,7 +437,33 @@ namespace GoalDrivenAI.Commands
             caller == previous.Issuer ? previous : new BatchResult(previous.RequestId, caller, false,
                 "Request ID belongs to another issuer.", Array.Empty<OrderRequest>(), Array.Empty<PolicyRequest>());
 
-        public CommandState Save() => new CommandState(orders.Values, policies.Values, batches.Values, feedback, emergency);
+        // Loop execution owns this namespace. Retire terminal records but retain a compact replay fence.
+        internal void RetireIteration(string issuer, string planHash, long iteration, IEnumerable<string> orderIds)
+        {
+            var ids = new HashSet<string>(orderIds, StringComparer.Ordinal);
+            if (retiredIterations.TryGetValue(planHash, out var previous) && previous.Issuer != issuer)
+                throw new InvalidOperationException("Plan namespace belongs to another issuer.");
+            string prefix = planHash + "_iteration_" + iteration.ToString(System.Globalization.CultureInfo.InvariantCulture) + "_";
+            if (ids.Any(id => !id.StartsWith(prefix, StringComparison.Ordinal)) ||
+                ids.Any(id => orders.TryGetValue(id, out var order) && (!order.IsTerminal || order.Issuer != issuer)) ||
+                orders.Values.Any(o => o.Request.ParentOrderId != null && ids.Contains(o.Request.ParentOrderId) && !ids.Contains(o.Request.OrderId)))
+                throw new InvalidOperationException("Iteration still owns live or referenced work.");
+            foreach (string id in ids) orders.Remove(id);
+            feedback.RemoveAll(f => ids.Contains(f.OrderId));
+            retiredIterations[planHash] = new RetiredPlanIteration(planHash, issuer, Math.Max(iteration, previous?.Iteration ?? 0));
+        }
+        private bool IsRetired(string id)
+        {
+            const string marker = "_iteration_";
+            if (id.Length <= 64 + marker.Length || id.Substring(64, marker.Length) != marker) return false;
+            string hash = id.Substring(0, 64);
+            int end = id.IndexOf('_', 64 + marker.Length);
+            return end > 0 && long.TryParse(id.Substring(64 + marker.Length, end - 64 - marker.Length),
+                System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long iteration) &&
+                retiredIterations.TryGetValue(hash, out var retired) && iteration <= retired.Iteration;
+        }
+
+        public CommandState Save() => new CommandState(orders.Values, policies.Values, batches.Values, feedback, emergency, retiredIterations.Values);
 
         public void Restore(CommandState state)
         {
@@ -442,11 +471,13 @@ namespace GoalDrivenAI.Commands
             var restoredOrders = state.Orders.ToDictionary(x => x.Request.OrderId);
             var restoredPolicies = state.Policies.ToDictionary(x => x.Request.PolicyId);
             var restoredBatches = state.Batches.ToDictionary(x => x.RequestId);
+            var restoredIterations = state.RetiredIterations.ToDictionary(x => x.PlanHash);
             if (restoredOrders.Values.Where(x => x.Status == OrderStatus.Active ||
                 (x.Status == OrderStatus.Suspended && x.ResumeStatus == OrderStatus.Active))
                 .GroupBy(x => x.Request.Recipient).Any(x => x.Count() > 1))
                 throw new ArgumentException("Snapshot has multiple primary orders.", nameof(state));
-            orders.Clear(); policies.Clear(); batches.Clear(); feedback.Clear(); emergency.Clear();
+            orders.Clear(); policies.Clear(); batches.Clear(); feedback.Clear(); emergency.Clear(); retiredIterations.Clear();
+            foreach (var item in restoredIterations) retiredIterations.Add(item.Key, item.Value);
             foreach (var item in restoredOrders) orders.Add(item.Key, item.Value);
             nextSequence = restoredOrders.Count == 0 ? 0 : restoredOrders.Values.Max(x => x.Sequence);
             foreach (var item in restoredPolicies) policies.Add(item.Key, item.Value);

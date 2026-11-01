@@ -5,6 +5,15 @@
   "description": "Utility goals, bounded GOAP and validated language-command contracts for a single-player FPS.",
   "unity": "6000.0",
   "dependencies": {
-    "com.unity.nuget.newtonsoft-json": "3.2.2"
-  }
+    "com.unity.nuget.newtonsoft-json": "3.2.2",
+    "com.unity.modules.ai": "1.0.0",
+    "com.unity.modules.audio": "1.0.0"
+  },
+  "samples": [
+    {
+      "displayName": "Stealth Maze",
+      "description": "Three-role stealth maze: infiltrator, guards commander or observer; checkpoint objectives, validated defense orders, configurable senses and crawl passages.",
+      "path": "Samples~/StealthMaze"
+    }
+  ]
 }
